@@ -1,0 +1,23 @@
+{
+  "project_info": {
+    "project_number": "0",
+    "project_id": "autopatch-placeholder",
+    "storage_bucket": "autopatch-placeholder.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:0:android:0",
+        "android_client_info": {
+          "package_name": "com.mahify.autopatch"
+        }
+      },
+      "api_key": [
+        {
+          "current_key": "replace-me"
+        }
+      ]
+    }
+  ],
+  "configuration_version": "1"
+}

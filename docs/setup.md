@@ -1,0 +1,78 @@
+# Local setup
+
+## Prerequisites
+
+- Git, Python 3.11+, Docker Desktop
+- Node.js 20+ (web)
+- Android Studio / JDK 17 (Android)
+- ngrok or Cloudflare Tunnel (GitHub webhooks)
+- Accounts when you exercise those paths: GitHub App, E2B, Firebase
+
+## Environment
+
+```text
+cp .env.example .env
+```
+
+Fill GitHub, E2B, and Firebase values when you use those features. Do not commit `.env`, `.pem` files, or Firebase JSON credentials.
+
+## Postgres and Redis
+
+```text
+docker compose -f infra/docker-compose.yml up -d
+```
+
+## Backend
+
+```text
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Celery (second terminal, venv active, repo `backend/` as cwd):
+
+```text
+celery -A app.workers.celery_app worker --loglevel=info
+```
+
+Tests:
+
+```text
+cd backend
+pytest
+```
+
+## GitHub App (webhook step)
+
+Create a GitHub App with **Contents: Read** and **Metadata: Read**. Subscribe to `installation` (and optionally `push`). Set the webhook URL to `https://<tunnel>/v1/github/webhook`. Install it on a private test repo. Put App ID, webhook secret, and PEM path in `.env`.
+
+## Web
+
+```text
+cd web
+npm install
+npm run dev
+```
+
+Opens a status page that calls `GET http://localhost:8000/health`.
+
+## Android
+
+1. Copy `android/app/google-services.json.example` to `android/app/google-services.json` and replace with your Firebase Android app file.
+2. Open `android/` in Android Studio, sync Gradle, run on a device/emulator with Play services.
+3. Register the device against `http://<lan-ip>:8000` (not `localhost` on a physical phone).
+4. Use **Send test push** or `POST /v1/devices/{device_id}/test-push` with header `X-API-Key`.
+
+## Suggested Weeks 1–2 order
+
+1. Compose + FastAPI health
+2. Alembic schema
+3. GitHub webhook HMAC
+4. Celery + E2B clone
+5. Tree-sitter index
+6. Android register + FCM
+7. Next.js health page
