@@ -1,0 +1,93 @@
+[1mdiff --git a/backend/alembic/env.py b/backend/alembic/env.py[m
+[1mindex 03ff16b..3c77f18 100644[m
+[1m--- a/backend/alembic/env.py[m
+[1m+++ b/backend/alembic/env.py[m
+[36m@@ -1,4 +1,9 @@[m
+ from logging.config import fileConfig[m
+[32m+[m[32mimport os[m
+[32m+[m[32mimport sys[m
+[32m+[m
+[32m+[m[32m# Make the backend folder available so "app" can be imported[m
+[32m+[m[32msys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))[m
+ [m
+ from alembic import context[m
+ from sqlalchemy import engine_from_config, pool[m
+[36m@@ -18,6 +23,7 @@[m [mtarget_metadata = Base.metadata[m
+ def run_migrations_offline() -> None:[m
+     url = config.get_main_option("sqlalchemy.url")[m
+     context.configure(url=url, target_metadata=target_metadata, literal_binds=True)[m
+[32m+[m
+     with context.begin_transaction():[m
+         context.run_migrations()[m
+ [m
+[36m@@ -28,8 +34,10 @@[m [mdef run_migrations_online() -> None:[m
+         prefix="sqlalchemy.",[m
+         poolclass=pool.NullPool,[m
+     )[m
+[32m+[m
+     with connectable.connect() as connection:[m
+         context.configure(connection=connection, target_metadata=target_metadata)[m
+[32m+[m
+         with context.begin_transaction():[m
+             context.run_migrations()[m
+ [m
+[36m@@ -37,4 +45,4 @@[m [mdef run_migrations_online() -> None:[m
+ if context.is_offline_mode():[m
+     run_migrations_offline()[m
+ else:[m
+[31m-    run_migrations_online()[m
+[32m+[m[32m    run_migrations_online()[m
+\ No newline at end of file[m
+[1mdiff --git a/backend/app/routers/github.py b/backend/app/routers/github.py[m
+[1mindex b19f81a..376770e 100644[m
+[1m--- a/backend/app/routers/github.py[m
+[1m+++ b/backend/app/routers/github.py[m
+[36m@@ -1,4 +1,5 @@[m
+ import json[m
+[32m+[m[32mimport httpx[m
+ [m
+ from fastapi import APIRouter, Depends, Header, HTTPException, Request[m
+ from sqlalchemy.orm import Session[m
+[36m@@ -6,7 +7,7 @@[m [mfrom sqlalchemy.orm import Session[m
+ from app.config import settings[m
+ from app.db import get_db[m
+ from app.models import GitHubInstallation, Repository[m
+[31m-from app.services.github_app import verify_webhook_signature[m
+[32m+[m[32mfrom app.services.github_app import get_installation_token, verify_webhook_signature[m
+ [m
+ router = APIRouter()[m
+ [m
+[36m@@ -77,3 +78,32 @@[m [masync def github_webhook([m
+         return {"ok": True, "event": event}[m
+ [m
+     return {"ok": True, "event": event, "ignored": True}[m
+[32m+[m
+[32m+[m[32m@router.get("/v1/github/repos")[m
+[32m+[m[32mdef github_repositories(installation_id: int):[m
+[32m+[m[32m    token = get_installation_token(installation_id)[m
+[32m+[m
+[32m+[m[32m    response = httpx.get([m
+[32m+[m[32m        "https://api.github.com/installation/repositories",[m
+[32m+[m[32m        headers={[m
+[32m+[m[32m            "Authorization": f"Bearer {token}",[m
+[32m+[m[32m            "Accept": "application/vnd.github+json",[m
+[32m+[m[32m            "X-GitHub-Api-Version": "2022-11-28",[m
+[32m+[m[32m        },[m
+[32m+[m[32m        timeout=30,[m
+[32m+[m[32m    )[m
+[32m+[m[32m    response.raise_for_status()[m
+[32m+[m
+[32m+[m[32m    data = response.json()[m
+[32m+[m
+[32m+[m[32m    return {[m
+[32m+[m[32m        "repositories": [[m
+[32m+[m[32m            {[m
+[32m+[m[32m                "full_name": repo["full_name"],[m
+[32m+[m[32m                "default_branch": repo.get("default_branch") or "main",[m
+[32m+[m[32m                "private": repo.get("private", False),[m
+[32m+[m[32m                "html_url": repo.get("html_url"),[m
+[32m+[m[32m            }[m
+[32m+[m[32m            for repo in data.get("repositories", [])[m
+[32m+[m[32m        ][m
+[32m+[m[32m    }[m
+\ No newline at end of file[m
