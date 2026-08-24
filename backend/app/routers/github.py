@@ -3,7 +3,9 @@ import httpx
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert
 
+from app.auth import require_api_key
 from app.config import settings
 from app.db import get_db
 from app.models import GitHubInstallation, Repository, SandboxRun
@@ -12,32 +14,37 @@ from app.workers.tasks import clone_and_index
 
 router = APIRouter()
 
-
 def _upsert_repos(db: Session, installation_id: int, repos: list[dict]) -> None:
+    rows = []
+
     for repo in repos:
         full_name = repo.get("full_name")
+
         if not full_name:
             continue
 
-        existing = (
-            db.query(Repository)
-            .filter(Repository.full_name == full_name)
-            .one_or_none()
+        rows.append(
+            {
+                "full_name": full_name,
+                "installation_id": installation_id,
+                "default_branch": repo.get("default_branch") or "main",
+            }
         )
 
-        if existing is None:
-            db.add(
-                Repository(
-                    full_name=full_name,
-                    installation_id=installation_id,
-                    default_branch=repo.get("default_branch") or "main",
-                )
-            )
-        else:
-            existing.installation_id = installation_id
+    if not rows:
+        return
 
-            if repo.get("default_branch"):
-                existing.default_branch = repo["default_branch"]
+    stmt = insert(Repository).values(rows)
+
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[Repository.full_name],
+        set_={
+            "installation_id": stmt.excluded.installation_id,
+            "default_branch": stmt.excluded.default_branch,
+        },
+    )
+
+    db.execute(stmt)
 
 
 @router.post("/v1/github/webhook")
@@ -181,19 +188,22 @@ async def github_webhook(
     }
 
 
-@router.get("/v1/github/repos")
-def github_repositories(installation_id: int):
-    token = get_installation_token(installation_id)
+@router.get(
+    "/v1/github/repos",
+    dependencies=[Depends(require_api_key)],
+)
+async def github_repositories(installation_id: int):
+    token = await get_installation_token(installation_id)
 
-    response = httpx.get(
-        "https://api.github.com/installation/repositories",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        timeout=30,
-    )
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            "https://api.github.com/installation/repositories",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
 
     response.raise_for_status()
 

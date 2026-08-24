@@ -10,7 +10,10 @@ from app.services import fcm
 router = APIRouter()
 
 
-@router.post("/v1/devices/register")
+@router.post(
+    "/v1/devices/register",
+    dependencies=[Depends(require_api_key)],
+)
 def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
     device = db.query(Device).filter(Device.device_id == body.device_id).one_or_none()
     if device is None:

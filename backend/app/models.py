@@ -1,7 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -11,7 +10,7 @@ class GitHubInstallation(Base):
     __tablename__ = "github_installations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    installation_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     account_login: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -23,18 +22,15 @@ class Repository(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     full_name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    installation_id: Mapped[int] = mapped_column(ForeignKey("github_installations.installation_id"))
+    installation_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("github_installations.installation_id"),
+    )
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
 
-    installation: Mapped[GitHubInstallation] = relationship(back_populates="repositories")
-
-
-class Incident(Base):
-    __tablename__ = "incidents"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    raw_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    installation: Mapped[GitHubInstallation] = relationship(
+        back_populates="repositories"
+    )
 
 
 class SandboxRun(Base):

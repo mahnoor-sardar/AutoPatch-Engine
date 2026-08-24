@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
@@ -26,13 +27,16 @@ def clone_and_index(run_id: int) -> None:
             .one()
         )
 
-        token = get_installation_token(repo.installation_id)
+        token = asyncio.run(
+           get_installation_token(repo.installation_id)
+        )
         url = clone_url(run.repo, token)
 
         sandbox_id, files = e2b_runner.clone_and_read_sources(
             url,
             run.ref,
-        )
+            token,
+)
 
         rows = indexer.index_files(files)
 

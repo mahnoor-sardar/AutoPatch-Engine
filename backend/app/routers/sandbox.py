@@ -23,7 +23,10 @@ def create_run(body: SandboxRunCreate, db: Session = Depends(get_db)):
     return {"id": run.id, "status": run.status}
 
 
-@router.get("/v1/sandbox/runs/{run_id}")
+@router.get(
+    "/v1/sandbox/runs/{run_id}",
+    dependencies=[Depends(require_api_key)],
+)
 def get_run(run_id: int, db: Session = Depends(get_db)):
     run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one_or_none()
     if run is None:

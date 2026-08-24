@@ -16,40 +16,52 @@ _PARSERS: dict[str, Parser] = {
 }
 
 
+_COMMON_JS_TARGETS = {
+    "function_declaration": "function",
+    "class_declaration": "class",
+    "method_definition": "method",
+    "arrow_function": "function",
+}
+
+
 _TARGET_NODES = {
     ".py": {
         "function_definition": "function",
         "class_definition": "class",
     },
-    ".js": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-    },
-    ".jsx": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-    },
-    ".ts": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-    },
-    ".tsx": {
-        "function_declaration": "function",
-        "class_declaration": "class",
-    },
+    ".js": _COMMON_JS_TARGETS,
+    ".jsx": _COMMON_JS_TARGETS,
+    ".ts": _COMMON_JS_TARGETS,
+    ".tsx": _COMMON_JS_TARGETS,
 }
 
 
 def _node_name(node) -> str:
     name_node = node.child_by_field_name("name")
 
-    if name_node is None:
-        return ""
+    if name_node is not None and name_node.text is not None:
+        return name_node.text.decode("utf-8")
 
-    if name_node.text is None:
-        return ""
+    # Arrow functions don't have a "name" field.
+    # Look at the parent variable declarator:
+    # const foo = () => {}
+    parent = node.parent
 
-    return name_node.text.decode("utf-8")
+    if parent is not None and parent.type == "variable_declarator":
+        name_node = parent.child_by_field_name("name")
+
+        if name_node is not None and name_node.text is not None:
+            return name_node.text.decode("utf-8")
+
+    # Exported function expressions can also be wrapped
+    # inside an export/default expression.
+    if parent is not None:
+        name_node = parent.child_by_field_name("name")
+
+        if name_node is not None and name_node.text is not None:
+            return name_node.text.decode("utf-8")
+
+    return ""
 
 
 def _walk_nodes(node):

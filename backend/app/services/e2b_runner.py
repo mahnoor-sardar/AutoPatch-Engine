@@ -10,7 +10,11 @@ MAX_FILE_BYTES = 200_000
 MAX_FILES = 200
 
 
-def clone_and_read_sources(clone_url: str, ref: str) -> tuple[str, dict[str, str]]:
+def clone_and_read_sources(
+    clone_url: str,
+    ref: str,
+    token: str,
+) -> tuple[str, dict[str, str]]:
     kwargs: dict = {"timeout": SANDBOX_TIMEOUT}
 
     if settings.e2b_api_key:
@@ -22,8 +26,13 @@ def clone_and_read_sources(clone_url: str, ref: str) -> tuple[str, dict[str, str
         safe_ref = shlex.quote(ref)
         safe_clone_url = shlex.quote(clone_url)
 
+        auth_header = shlex.quote(
+            f"Authorization: Bearer {token}"
+        )
+
         clone_command = (
-            f"git clone --depth 1 "
+            f"git -c http.extraHeader={auth_header} "
+            f"clone --depth 1 "
             f"--branch {safe_ref} "
             f"{safe_clone_url} "
             f"/home/user/repo"
