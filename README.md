@@ -12,7 +12,7 @@ The AI patching agent, OTP gates, Sentry/Datadog ingest, and production dashboar
 |------|------|
 | `backend/` | FastAPI, Celery, GitHub App, E2B, Tree-sitter, FCM |
 | `web/` | Next.js 14 status page (`GET /health`) |
-| `android/` | Kotlin + Jetpack Compose companion |
+| `android-app/` | Kotlin + Jetpack Compose companion |
 | `infra/` | Docker Compose for Postgres 16 and Redis 7 |
 | `docs/` | Setup and architecture |
 

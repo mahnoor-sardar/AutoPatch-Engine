@@ -62,8 +62,8 @@ Opens a status page that calls `GET http://localhost:8000/health`.
 
 ## Android
 
-1. Copy `android/app/google-services.json.example` to `android/app/google-services.json` and replace with your Firebase Android app file.
-2. Open `android/` in Android Studio, sync Gradle, run on a device/emulator with Play services.
+1. Copy `android-app/app/google-services.json.example` to `android-app/app/google-services.json` and replace with your Firebase Android app file.
+2. Open `android-app/` in Android Studio, sync Gradle, run on a device/emulator with Play services.
 3. Register the device against `http://<lan-ip>:8000` (not `localhost` on a physical phone).
 4. Use **Send test push** or `POST /v1/devices/{device_id}/test-push` with header `X-API-Key`.
 

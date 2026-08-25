@@ -6,7 +6,7 @@ Simple monorepo. No shared libraries or plugin frameworks.
 
 - **backend/** — FastAPI, Celery, GitHub installation tokens, E2B clone, Tree-sitter symbols, FCM send.
 - **web/** — Next.js 14 App Router status page only. Live dashboard is Weeks 7–8.
-- **android/** — Kotlin Compose companion: register device and receive a test push. OTP, biometrics, and remote pause/kill come later.
+- **android-app/** — Kotlin Compose companion: register device and receive a test push. OTP, biometrics, and remote pause/kill come later.
 - **infra/** — Docker Compose for local Postgres and Redis.
 - **docs/** — How to run and how pieces connect.
 
