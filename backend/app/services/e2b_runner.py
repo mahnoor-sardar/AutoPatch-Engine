@@ -26,13 +26,8 @@ def clone_and_read_sources(
         safe_ref = shlex.quote(ref)
         safe_clone_url = shlex.quote(clone_url)
 
-        auth_header = shlex.quote(
-            f"Authorization: Bearer {token}"
-        )
-
         clone_command = (
-            f"git -c http.extraHeader={auth_header} "
-            f"clone --depth 1 "
+            f"git clone --depth 1 "
             f"--branch {safe_ref} "
             f"{safe_clone_url} "
             f"/home/user/repo"

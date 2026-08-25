@@ -25,6 +25,7 @@ out/
 web/.env*.local
 
 # Android / Gradle
+android-app/.kotlin/
 android/.gradle/
 android/build/
 android/app/build/

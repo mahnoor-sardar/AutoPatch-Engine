@@ -1,8 +1,24 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     id("com.google.gms.google-services")
 }
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use {
+        localProperties.load(it)
+    }
+}
+
+val autoPatchApiKey =
+    localProperties.getProperty("AUTOPATCH_API_KEY") ?: ""
+val githubInstallationId =
+    localProperties.getProperty("AUTOPATCH_GITHUB_INSTALLATION_ID") ?: ""
 
 android {
     namespace = "com.mahify.autopatch"
@@ -11,15 +27,25 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.mahify.autopatch"
-        minSdk = 24
-        targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+    applicationId = "com.mahify.autopatch"
+    minSdk = 24
+    targetSdk = 37
+    versionCode = 1
+    versionName = "1.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+    buildConfigField(
+        "String",
+        "AUTOPATCH_API_KEY",
+        "\"$autoPatchApiKey\""
+    )
+        buildConfigField(
+            "String",
+            "GITHUB_INSTALLATION_ID",
+            "\"$githubInstallationId\""
+        )
+}
     buildTypes {
         release {
             optimization {
@@ -33,8 +59,10 @@ android {
     }
     buildFeatures {
         compose = true
-    }
+        buildConfig = true
 }
+    }
+
 
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
