@@ -46,7 +46,7 @@ data class SandboxRunsResponse(
 
 object ApiClient {
 
-    private const val BASE_URL = "http://192.168.18.36:8000"
+    private val BASE_URL = BuildConfig.AUTOPATCH_BASE_URL
 
     private val client = OkHttpClient()
 

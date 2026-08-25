@@ -17,35 +17,50 @@ if (localPropertiesFile.exists()) {
 
 val autoPatchApiKey =
     localProperties.getProperty("AUTOPATCH_API_KEY") ?: ""
+
 val githubInstallationId =
     localProperties.getProperty("AUTOPATCH_GITHUB_INSTALLATION_ID") ?: ""
 
+val autoPatchBaseUrl =
+    localProperties.getProperty("AUTOPATCH_BASE_URL")
+        ?: ""
+
 android {
     namespace = "com.mahify.autopatch"
+
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-    applicationId = "com.mahify.autopatch"
-    minSdk = 24
-    targetSdk = 37
-    versionCode = 1
-    versionName = "1.0"
+        applicationId = "com.mahify.autopatch"
+        minSdk = 24
+        targetSdk = 37
+        versionCode = 1
+        versionName = "1.0"
 
-    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner =
+            "androidx.test.runner.AndroidJUnitRunner"
 
-    buildConfigField(
-        "String",
-        "AUTOPATCH_API_KEY",
-        "\"$autoPatchApiKey\""
-    )
+        buildConfigField(
+            "String",
+            "AUTOPATCH_API_KEY",
+            "\"$autoPatchApiKey\""
+        )
+
         buildConfigField(
             "String",
             "GITHUB_INSTALLATION_ID",
             "\"$githubInstallationId\""
         )
-}
+
+        buildConfigField(
+            "String",
+            "AUTOPATCH_BASE_URL",
+            "\"$autoPatchBaseUrl\""
+        )
+    }
+
     buildTypes {
         release {
             optimization {
@@ -53,16 +68,17 @@ android {
             }
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
     buildFeatures {
         compose = true
         buildConfig = true
-}
     }
-
+}
 
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
@@ -74,14 +90,37 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.2")
+
+    implementation(
+        "androidx.lifecycle:lifecycle-viewmodel-compose:2.9.2"
+    )
+
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.firebase:firebase-messaging:24.1.2")
+
     testImplementation(libs.junit)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(libs.androidx.junit)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
-    debugImplementation(libs.androidx.compose.ui.tooling)
+
+    androidTestImplementation(
+        platform(libs.androidx.compose.bom)
+    )
+
+    androidTestImplementation(
+        libs.androidx.compose.ui.test.junit4
+    )
+
+    androidTestImplementation(
+        libs.androidx.espresso.core
+    )
+
+    androidTestImplementation(
+        libs.androidx.junit
+    )
+
+    debugImplementation(
+        libs.androidx.compose.ui.test.manifest
+    )
+
+    debugImplementation(
+        libs.androidx.compose.ui.tooling
+    )
 }

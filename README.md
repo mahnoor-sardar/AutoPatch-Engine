@@ -19,6 +19,3 @@ The AI patching agent, OTP gates, Sentry/Datadog ingest, and production dashboar
 ## Quick start
 
 See [docs/setup.md](docs/setup.md). Architecture: [docs/architecture.md](docs/architecture.md).
-
-
-<!-- pipeline test -->
