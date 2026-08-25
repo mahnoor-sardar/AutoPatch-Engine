@@ -1,11 +1,5 @@
 package com.mahify.autopatch.ui.screens
 
-import com.mahify.autopatch.ui.theme.AccentPrimary
-import com.mahify.autopatch.ui.theme.AccentPrimaryMuted
-import com.mahify.autopatch.ui.theme.BorderSubtle
-import com.mahify.autopatch.ui.theme.SurfaceElevation1
-import com.mahify.autopatch.ui.theme.TextPrimary
-import com.mahify.autopatch.ui.theme.TextSecondary
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -51,7 +45,8 @@ data class RepositoriesUiState(
 class RepositoriesViewModel : ViewModel() {
 
     private val _uiState = MutableStateFlow(RepositoriesUiState())
-    val uiState: StateFlow<RepositoriesUiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<RepositoriesUiState> =
+        _uiState.asStateFlow()
 
     init {
         loadRepositories()
@@ -74,7 +69,8 @@ class RepositoriesViewModel : ViewModel() {
             } catch (e: Exception) {
                 _uiState.value = RepositoriesUiState(
                     isLoading = false,
-                    error = e.message ?: "Unable to load repositories"
+                    error = e.message
+                        ?: "Unable to load repositories"
                 )
             }
         }
@@ -88,7 +84,9 @@ fun RepositoriesScreen(
 ) {
     val uiState by repositoriesViewModel.uiState.collectAsState()
 
-    Column(modifier = modifier.fillMaxSize()) {
+    Column(
+        modifier = modifier.fillMaxSize()
+    ) {
 
         Column(
             modifier = Modifier.padding(
@@ -162,7 +160,9 @@ fun RepositoriesScreen(
 }
 
 @Composable
-private fun RepoCard(repo: GitHubRepository){
+private fun RepoCard(
+    repo: GitHubRepository
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()

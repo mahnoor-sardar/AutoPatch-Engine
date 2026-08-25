@@ -106,18 +106,20 @@ def index_source(path: str, source: str) -> list[tuple[str, str, int]]:
     return hits
 
 
-def index_files(files: dict[str, str]) -> list[dict]:
-    rows: list[dict] = []
+def index_files(
+    files: dict[str, str],
+) -> list[tuple[str, str, str, int]]:
+    rows: list[tuple[str, str, str, int]] = []
 
     for path, source in files.items():
         for name, kind, line in index_source(path, source):
             rows.append(
-                {
-                    "path": path,
-                    "name": name,
-                    "kind": kind,
-                    "start_line": line,
-                }
+                (
+                    path,
+                    name,
+                    kind,
+                    line,
+                )
             )
 
     return rows

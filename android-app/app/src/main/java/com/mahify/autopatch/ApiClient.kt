@@ -6,6 +6,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import android.content.Context
+import android.os.Build
+import android.provider.Settings
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 data class BackendHealth(
     val ok: Boolean,
@@ -45,6 +50,44 @@ data class SandboxRunsResponse(
 )
 
 object ApiClient {
+
+suspend fun registerDevice(
+    context: Context,
+    fcmToken: String
+) = withContext(Dispatchers.IO) {
+
+    val deviceId =
+        Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ANDROID_ID
+        ) ?: throw Exception("Unable to determine Android device ID")
+
+    val label = Build.MODEL
+
+    val json = JSONObject().apply {
+        put("device_id", deviceId)
+        put("fcm_token", fcmToken)
+        put("label", label)
+    }
+
+    val body = json.toString()
+        .toRequestBody("application/json".toMediaType())
+
+    val request = Request.Builder()
+        .url("$BASE_URL/v1/devices/register")
+        .addHeader("X-API-Key", apiKey())
+        .post(body)
+        .build()
+
+    client.newCall(request).execute().use { response ->
+
+        if (!response.isSuccessful) {
+            throw Exception(
+                "Device registration failed: HTTP ${response.code}"
+            )
+        }
+    }
+}
 
     private val BASE_URL = BuildConfig.AUTOPATCH_BASE_URL
 

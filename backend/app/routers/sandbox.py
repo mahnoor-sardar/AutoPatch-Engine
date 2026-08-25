@@ -98,34 +98,28 @@ def list_runs(
         .all()
     )
 
-    total = (
-        db.query(func.count(SandboxRun.id))
-        .scalar()
-        or 0
-    )
-
-    successful = (
-        db.query(func.count(SandboxRun.id))
-        .filter(SandboxRun.status == "completed")
-        .scalar()
-        or 0
-    )
-
-    running = (
-        db.query(func.count(SandboxRun.id))
-        .filter(
-            SandboxRun.status.in_(["running", "queued"])
+    stats = (
+        db.query(
+            func.count(SandboxRun.id).label("total"),
+            func.count(SandboxRun.id)
+            .filter(SandboxRun.status == "completed")
+            .label("successful"),
+            func.count(SandboxRun.id)
+            .filter(
+                SandboxRun.status.in_(["running", "queued"])
+            )
+            .label("running"),
+            func.count(SandboxRun.id)
+            .filter(SandboxRun.status == "failed")
+            .label("failed"),
         )
-        .scalar()
-        or 0
+        .one()
     )
 
-    failed = (
-        db.query(func.count(SandboxRun.id))
-        .filter(SandboxRun.status == "failed")
-        .scalar()
-        or 0
-    )
+    total = stats.total or 0
+    successful = stats.successful or 0
+    running = stats.running or 0
+    failed = stats.failed or 0
 
     return {
         "stats": {

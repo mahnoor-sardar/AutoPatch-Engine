@@ -7,6 +7,8 @@ google-services.json
 *-firebase-adminsdk-*.json
 serviceAccount*.json
 
+backend/secrets/
+
 # Python
 __pycache__/
 *.py[cod]

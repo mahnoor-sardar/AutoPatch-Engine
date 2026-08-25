@@ -26,20 +26,49 @@ def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
     return {"ok": True, "device_id": device.device_id}
 
 
-@router.post("/v1/devices/{device_id}/test-push", dependencies=[Depends(require_api_key)])
+@router.post(
+    "/v1/devices/{device_id}/test-push",
+    dependencies=[Depends(require_api_key)],
+)
 def test_push(device_id: str, db: Session = Depends(get_db)):
-    device = db.query(Device).filter(Device.device_id == device_id).one_or_none()
+    device = (
+        db.query(Device)
+        .filter(Device.device_id == device_id)
+        .one_or_none()
+    )
+
     if device is None:
-        raise HTTPException(status_code=404, detail="device not found")
+        raise HTTPException(
+            status_code=404,
+            detail="device not found",
+        )
+
     title = "AutoPatch test"
+    status = "sent"
+
     try:
-        fcm.send_push(device.fcm_token, title, "Device registration pipeline is working.")
-        status = "sent"
+        fcm.send_push(
+            device.fcm_token,
+            title,
+            "Device registration pipeline is working.",
+        )
     except Exception as exc:
         status = "failed"
-        db.add(PushEvent(device_id=device_id, title=title, status=status))
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+    finally:
+        db.add(
+            PushEvent(
+                device_id=device_id,
+                title=title,
+                status=status,
+            )
+        )
         db.commit()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    db.add(PushEvent(device_id=device_id, title=title, status=status))
-    db.commit()
-    return {"ok": True, "status": status}
+
+    return {
+        "ok": True,
+        "status": status,
+    }

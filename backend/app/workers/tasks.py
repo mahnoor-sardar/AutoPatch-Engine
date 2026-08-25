@@ -28,7 +28,7 @@ def clone_and_index(run_id: int) -> None:
         )
 
         token = asyncio.run(
-           get_installation_token(repo.installation_id)
+            get_installation_token(repo.installation_id)
         )
         url = clone_url(run.repo)
 
@@ -36,20 +36,23 @@ def clone_and_index(run_id: int) -> None:
             url,
             run.ref,
             token,
-)
+        )
 
         rows = indexer.index_files(files)
 
-        for row in rows:
-            db.add(
-                Symbol(
-                    run_id=run.id,
-                    path=row["path"],
-                    name=row["name"],
-                    kind=row["kind"],
-                    start_line=row["start_line"],
-                )
-            )
+        db.bulk_insert_mappings(
+            Symbol,
+            [
+                {
+                    "run_id": run.id,
+                    "path": path,
+                    "name": name,
+                    "kind": kind,
+                    "start_line": line,
+                }
+                for path, name, kind, line in rows
+            ],
+        )
 
         finished = datetime.now(timezone.utc)
 

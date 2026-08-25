@@ -17,8 +17,6 @@ import androidx.compose.material.icons.outlined.ListAlt
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
-import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -97,7 +95,8 @@ fun HomeScreen(
                 SystemStatusGrid(
                     backendOnline = uiState.backendOnline,
                     postgresOnline = uiState.postgresOnline,
-                    redisOnline = uiState.redisOnline
+                    redisOnline = uiState.redisOnline,
+                    firebaseOnline = uiState.firebaseOnline
                 )
             }
         }
@@ -211,7 +210,8 @@ fun HomeScreen(
 private fun SystemStatusGrid(
     backendOnline: Boolean,
     postgresOnline: Boolean,
-    redisOnline: Boolean
+    redisOnline: Boolean,
+    firebaseOnline: Boolean
 ) {
     Column(
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -299,9 +299,21 @@ private fun SystemStatusGrid(
                 system = SystemStatus(
                     id = "firebase",
                     name = "Firebase",
-                    statusLabel = "Unknown",
-                    description = "Push status not reported",
-                    health = HealthState.UNKNOWN,
+                    statusLabel = if (firebaseOnline) {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    description = if (firebaseOnline) {
+                        "FCM token available"
+                    } else {
+                        "FCM unavailable"
+                    },
+                    health = if (firebaseOnline) {
+                        HealthState.ONLINE
+                    } else {
+                        HealthState.OFFLINE
+                    },
                     icon = Icons.Outlined.NotificationsNone
                 ),
                 modifier = Modifier.weight(1f)
