@@ -30,7 +30,7 @@ def clone_and_index(run_id: int) -> None:
         token = asyncio.run(
            get_installation_token(repo.installation_id)
         )
-        url = clone_url(run.repo, token)
+        url = clone_url(run.repo)
 
         sandbox_id, files = e2b_runner.clone_and_read_sources(
             url,

@@ -84,6 +84,5 @@ async def get_installation_token(installation_id: int) -> str:
     return response.json()["token"]
 
 
-def clone_url(owner_repo: str, token: str) -> str:
-    return f"https://x-access-token:{token}@github.com/{owner_repo}.git"
-    
+def clone_url(owner_repo: str) -> str:
+    return f"https://github.com/{owner_repo}.git"

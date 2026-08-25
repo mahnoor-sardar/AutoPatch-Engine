@@ -25,12 +25,17 @@ def clone_and_read_sources(
     try:
         safe_ref = shlex.quote(ref)
         safe_clone_url = shlex.quote(clone_url)
+        safe_token = shlex.quote(token)
 
         clone_command = (
-            f"git clone --depth 1 "
+            "git -c credential.helper='!f() { "
+            "echo username=x-access-token; "
+            f"echo password={safe_token}; "
+            "}; f' "
+            "clone --depth 1 "
             f"--branch {safe_ref} "
             f"{safe_clone_url} "
-            f"/home/user/repo"
+            "/home/user/repo"
         )
 
         sandbox.commands.run(
