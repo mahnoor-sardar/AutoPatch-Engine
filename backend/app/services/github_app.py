@@ -84,5 +84,28 @@ async def get_installation_token(installation_id: int) -> str:
     return response.json()["token"]
 
 
+def get_installation_token_sync(installation_id: int) -> str:
+    token = make_app_jwt()
+
+    url = (
+        "https://api.github.com"
+        f"/app/installations/{installation_id}/access_tokens"
+    )
+
+    with httpx.Client(timeout=30) as client:
+        response = client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+
+    response.raise_for_status()
+
+    return response.json()["token"]
+
+
 def clone_url(owner_repo: str) -> str:
     return f"https://github.com/{owner_repo}.git"

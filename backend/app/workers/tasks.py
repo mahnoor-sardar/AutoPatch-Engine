@@ -1,10 +1,12 @@
-import asyncio
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
 from app.models import Repository, SandboxRun, Symbol
 from app.services import e2b_runner, indexer
-from app.services.github_app import clone_url, get_installation_token
+from app.services.github_app import (
+    clone_url,
+    get_installation_token_sync,
+)
 from app.workers.celery_app import celery_app
 
 
@@ -27,8 +29,8 @@ def clone_and_index(run_id: int) -> None:
             .one()
         )
 
-        token = asyncio.run(
-            get_installation_token(repo.installation_id)
+        token = get_installation_token_sync(
+            repo.installation_id
         )
         url = clone_url(run.repo)
 
