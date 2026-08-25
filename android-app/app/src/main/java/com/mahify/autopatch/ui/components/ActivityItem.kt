@@ -57,8 +57,15 @@ fun ActivityItem(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(SurfaceElevation1, MaterialTheme.shapes.medium)
-            .border(1.dp, BorderSubtle, MaterialTheme.shapes.medium)
+            .background(
+                SurfaceElevation1,
+                MaterialTheme.shapes.medium
+            )
+            .border(
+                1.dp,
+                BorderSubtle,
+                MaterialTheme.shapes.medium
+            )
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -79,14 +86,14 @@ fun ActivityItem(
         Spacer(Modifier.width(12.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "Patch ${activity.patchNumber}",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary
-                )
-            }
+            Text(
+                text = "Patch ${activity.patchNumber}",
+                style = MaterialTheme.typography.titleSmall,
+                color = TextPrimary
+            )
+
             Spacer(Modifier.height(2.dp))
+
             Text(
                 text = activity.repository,
                 style = MaterialTheme.typography.bodySmall,
@@ -100,7 +107,9 @@ fun ActivityItem(
                 style = MaterialTheme.typography.labelMedium,
                 color = colors.fg
             )
+
             Spacer(Modifier.height(2.dp))
+
             Text(
                 text = activity.timeAgo,
                 style = MaterialTheme.typography.labelSmall,
@@ -109,4 +118,3 @@ fun ActivityItem(
         }
     }
 }
-
