@@ -28,10 +28,8 @@ def clone_and_read_sources(
         safe_token = shlex.quote(token)
 
         clone_command = (
-            "git -c credential.helper='!f() { "
-            "echo username=x-access-token; "
-            f"echo password={safe_token}; "
-            "}; f' "
+            "git "
+            f"-c http.extraHeader='Authorization: Bearer {safe_token}' "
             "clone --depth 1 "
             f"--branch {safe_ref} "
             f"{safe_clone_url} "
