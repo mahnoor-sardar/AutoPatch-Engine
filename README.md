@@ -17,8 +17,6 @@ The AI patching agent, OTP gates, Sentry/Datadog ingest, and production dashboar
 | `docs/` | Setup and architecture |
 
 ## Quick start
-Webhook integration test.
-Webhook push test 2
 
 See [docs/setup.md](docs/setup.md). Architecture: [docs/architecture.md](docs/architecture.md).
 
