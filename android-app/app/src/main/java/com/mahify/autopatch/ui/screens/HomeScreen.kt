@@ -1,13 +1,23 @@
 package com.mahify.autopatch.ui.screens
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.ListAlt
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -17,8 +27,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 import com.mahify.autopatch.HomeViewModel
+import com.mahify.autopatch.SandboxRun
 import com.mahify.autopatch.model.HealthState
-import com.mahify.autopatch.model.MockData
+import com.mahify.autopatch.model.PatchActivity
+import com.mahify.autopatch.model.PatchStatus
+import com.mahify.autopatch.model.SystemStatus
 import com.mahify.autopatch.ui.components.ActivityItem
 import com.mahify.autopatch.ui.components.EngineStatusCard
 import com.mahify.autopatch.ui.components.QuickActionCard
@@ -102,7 +115,7 @@ fun HomeScreen(
                         label = "Refresh",
                         icon = Icons.Outlined.Refresh,
                         onClick = {
-                            homeViewModel.refreshHealth()
+                            homeViewModel.refresh()
                         },
                         modifier = Modifier.weight(1f)
                     )
@@ -137,34 +150,32 @@ fun HomeScreen(
             ) {
                 SectionHeader(title = "Patch Statistics")
 
-                val stats = MockData.stats
-
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     StatCard(
-                        value = stats.total.toString(),
+                        value = uiState.totalRuns.toString(),
                         label = "Total",
                         accentColor = TextPrimary,
                         modifier = Modifier.weight(1f)
                     )
 
                     StatCard(
-                        value = stats.successful.toString(),
+                        value = uiState.successfulRuns.toString(),
                         label = "Successful",
                         accentColor = StatusOnline,
                         modifier = Modifier.weight(1f)
                     )
 
                     StatCard(
-                        value = stats.running.toString(),
+                        value = uiState.runningRuns.toString(),
                         label = "Running",
                         accentColor = StatusWarning,
                         modifier = Modifier.weight(1f)
                     )
 
                     StatCard(
-                        value = stats.failed.toString(),
+                        value = uiState.failedRuns.toString(),
                         label = "Failed",
                         accentColor = StatusError,
                         modifier = Modifier.weight(1f)
@@ -181,8 +192,13 @@ fun HomeScreen(
             )
         }
 
-        items(MockData.recentActivity.take(4)) { activity ->
-            ActivityItem(activity = activity)
+        items(
+            uiState.recentRuns.take(4),
+            key = { it.id }
+        ) { run ->
+            ActivityItem(
+                activity = run.toPatchActivity()
+            )
         }
 
         item {
@@ -204,23 +220,49 @@ private fun SystemStatusGrid(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             SystemStatusCard(
-                system = MockData.systems[0].copy(
+                system = SystemStatus(
+                    id = "backend",
+                    name = "Backend",
+                    statusLabel = if (backendOnline) {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    description = if (backendOnline) {
+                        "API responding normally"
+                    } else {
+                        "API unavailable"
+                    },
                     health = if (backendOnline) {
                         HealthState.ONLINE
                     } else {
                         HealthState.OFFLINE
-                    }
+                    },
+                    icon = Icons.Outlined.Dns
                 ),
                 modifier = Modifier.weight(1f)
             )
 
             SystemStatusCard(
-                system = MockData.systems[1].copy(
+                system = SystemStatus(
+                    id = "postgres",
+                    name = "PostgreSQL",
+                    statusLabel = if (postgresOnline) {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    description = if (postgresOnline) {
+                        "Database responding normally"
+                    } else {
+                        "Database unavailable"
+                    },
                     health = if (postgresOnline) {
                         HealthState.ONLINE
                     } else {
                         HealthState.OFFLINE
-                    }
+                    },
+                    icon = Icons.Outlined.Storage
                 ),
                 modifier = Modifier.weight(1f)
             )
@@ -230,20 +272,97 @@ private fun SystemStatusGrid(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             SystemStatusCard(
-                system = MockData.systems[2].copy(
+                system = SystemStatus(
+                    id = "redis",
+                    name = "Redis",
+                    statusLabel = if (redisOnline) {
+                        "Connected"
+                    } else {
+                        "Disconnected"
+                    },
+                    description = if (redisOnline) {
+                        "Queue responding normally"
+                    } else {
+                        "Queue unavailable"
+                    },
                     health = if (redisOnline) {
                         HealthState.ONLINE
                     } else {
                         HealthState.OFFLINE
-                    }
+                    },
+                    icon = Icons.Outlined.Cloud
                 ),
                 modifier = Modifier.weight(1f)
             )
 
             SystemStatusCard(
-                system = MockData.systems[3],
+                system = SystemStatus(
+                    id = "firebase",
+                    name = "Firebase",
+                    statusLabel = "Unknown",
+                    description = "Push status not reported",
+                    health = HealthState.UNKNOWN,
+                    icon = Icons.Outlined.NotificationsNone
+                ),
                 modifier = Modifier.weight(1f)
             )
         }
+    }
+}
+
+private fun SandboxRun.toPatchActivity(): PatchActivity {
+    return PatchActivity(
+        id = id.toString(),
+        patchNumber = "#$id",
+        repository = repo,
+        status = when (status.lowercase()) {
+            "completed" -> PatchStatus.COMPLETED
+            "failed" -> PatchStatus.FAILED
+            "running" -> PatchStatus.RUNNING
+            else -> PatchStatus.QUEUED
+        },
+        timeAgo = formatTimeAgo(
+            startedAt = startedAt,
+            finishedAt = finishedAt
+        )
+    )
+}
+
+private fun formatTimeAgo(
+    startedAt: String?,
+    finishedAt: String?
+): String {
+    val timestamp = finishedAt ?: startedAt
+        ?: return "Unknown time"
+
+    return try {
+        val instant = java.time.Instant.parse(timestamp)
+        val now = java.time.Instant.now()
+
+        val seconds = java.time.Duration.between(
+            instant,
+            now
+        ).seconds.coerceAtLeast(0)
+
+        when {
+            seconds < 60 -> "Just now"
+
+            seconds < 3600 -> {
+                val minutes = seconds / 60
+                "$minutes min ago"
+            }
+
+            seconds < 86400 -> {
+                val hours = seconds / 3600
+                "$hours hr ago"
+            }
+
+            else -> {
+                val days = seconds / 86400
+                "$days days ago"
+            }
+        }
+    } catch (_: Exception) {
+        "Unknown time"
     }
 }

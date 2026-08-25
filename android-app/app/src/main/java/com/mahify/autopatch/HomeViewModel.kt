@@ -11,6 +11,14 @@ data class HomeUiState(
     val backendOnline: Boolean = false,
     val postgresOnline: Boolean = false,
     val redisOnline: Boolean = false,
+
+    val totalRuns: Int = 0,
+    val successfulRuns: Int = 0,
+    val runningRuns: Int = 0,
+    val failedRuns: Int = 0,
+
+    val recentRuns: List<SandboxRun> = emptyList(),
+
     val isLoading: Boolean = true,
     val error: String? = null
 )
@@ -18,14 +26,17 @@ data class HomeUiState(
 class HomeViewModel : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeUiState())
-    val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
+
+    val uiState: StateFlow<HomeUiState> =
+        _uiState.asStateFlow()
 
     init {
-        refreshHealth()
+        refresh()
     }
 
-    fun refreshHealth() {
+    fun refresh() {
         viewModelScope.launch {
+
             _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 error = null
@@ -33,22 +44,39 @@ class HomeViewModel : ViewModel() {
 
             try {
                 val health = ApiClient.getHealth()
+                val sandbox = ApiClient.getSandboxRuns()
 
                 _uiState.value = HomeUiState(
                     backendOnline = health.ok,
                     postgresOnline = health.postgres,
                     redisOnline = health.redis,
-                    isLoading = false
+
+                    totalRuns = sandbox.stats.total,
+                    successfulRuns = sandbox.stats.successful,
+                    runningRuns = sandbox.stats.running,
+                    failedRuns = sandbox.stats.failed,
+
+                    recentRuns = sandbox.runs,
+
+                    isLoading = false,
+                    error = null
                 )
+
             } catch (e: Exception) {
-                _uiState.value = HomeUiState(
+
+                _uiState.value = _uiState.value.copy(
                     backendOnline = false,
                     postgresOnline = false,
                     redisOnline = false,
                     isLoading = false,
-                    error = e.message ?: "Unable to connect to backend"
+                    error = e.message
+                        ?: "Unable to connect to backend"
                 )
             }
         }
+    }
+
+    fun refreshHealth() {
+        refresh()
     }
 }

@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
 
 data class BackendHealth(
     val ok: Boolean,
@@ -17,6 +18,30 @@ data class GitHubRepository(
     val defaultBranch: String,
     val private: Boolean,
     val htmlUrl: String?
+)
+
+data class SandboxRun(
+    val id: Int,
+    val repo: String,
+    val ref: String,
+    val status: String,
+    val durationMs: Int?,
+    val error: String?,
+    val startedAt: String?,
+    val finishedAt: String?,
+    val symbolCount: Int
+)
+
+data class SandboxStats(
+    val total: Int,
+    val successful: Int,
+    val running: Int,
+    val failed: Int
+)
+
+data class SandboxRunsResponse(
+    val stats: SandboxStats,
+    val runs: List<SandboxRun>
 )
 
 object ApiClient {
@@ -43,31 +68,12 @@ object ApiClient {
             val body = response.body?.string()
                 ?: throw Exception("Empty backend response")
 
-            val ok = Regex("\"ok\"\\s*:\\s*(true|false)")
-                .find(body)
-                ?.groupValues
-                ?.get(1)
-                ?.toBoolean()
-                ?: false
-
-            val postgres = Regex("\"postgres\"\\s*:\\s*(true|false)")
-                .find(body)
-                ?.groupValues
-                ?.get(1)
-                ?.toBoolean()
-                ?: false
-
-            val redis = Regex("\"redis\"\\s*:\\s*(true|false)")
-                .find(body)
-                ?.groupValues
-                ?.get(1)
-                ?.toBoolean()
-                ?: false
+            val root = JSONObject(body)
 
             BackendHealth(
-                ok = ok,
-                postgres = postgres,
-                redis = redis
+                ok = root.optBoolean("ok", false),
+                postgres = root.optBoolean("postgres", false),
+                redis = root.optBoolean("redis", false)
             )
         }
     }
@@ -101,7 +107,8 @@ object ApiClient {
                 val body = response.body?.string()
                     ?: throw Exception("Empty backend response")
 
-                val root = org.json.JSONObject(body)
+                val root = JSONObject(body)
+
                 val repositories = root.optJSONArray("repositories")
                     ?: JSONArray()
 
@@ -123,10 +130,88 @@ object ApiClient {
                                 htmlUrl = repo.optString("html_url")
                                     .takeIf { it.isNotBlank() }
                             )
-
                         )
                     }
                 }
             }
         }
+
+    suspend fun getSandboxRuns(
+        limit: Int = 20
+    ): SandboxRunsResponse = withContext(Dispatchers.IO) {
+
+        val request = Request.Builder()
+            .url("$BASE_URL/v1/sandbox/runs?limit=$limit")
+            .addHeader("X-API-Key", apiKey())
+            .get()
+            .build()
+
+        client.newCall(request).execute().use { response ->
+
+            if (!response.isSuccessful) {
+                throw Exception(
+                    "Backend returned HTTP ${response.code}"
+                )
+            }
+
+            val body = response.body?.string()
+                ?: throw Exception("Empty backend response")
+
+            val root = JSONObject(body)
+
+            val statsJson = root.optJSONObject("stats")
+                ?: JSONObject()
+
+            val stats = SandboxStats(
+                total = statsJson.optInt("total", 0),
+                successful = statsJson.optInt("successful", 0),
+                running = statsJson.optInt("running", 0),
+                failed = statsJson.optInt("failed", 0)
+            )
+
+            val runsJson = root.optJSONArray("runs")
+                ?: JSONArray()
+
+            val runs = buildList {
+                for (i in 0 until runsJson.length()) {
+                    val run = runsJson.getJSONObject(i)
+
+                    add(
+                        SandboxRun(
+                            id = run.optInt("id"),
+                            repo = run.optString("repo"),
+                            ref = run.optString("ref", "main"),
+                            status = run.optString(
+                                "status",
+                                "unknown"
+                            ),
+                            durationMs = if (
+                                run.has("duration_ms") &&
+                                !run.isNull("duration_ms")
+                            ) {
+                                run.optInt("duration_ms")
+                            } else {
+                                null
+                            },
+                            error = run.optString("error")
+                                .takeIf { it.isNotBlank() },
+                            startedAt = run.optString("started_at")
+                                .takeIf { it.isNotBlank() },
+                            finishedAt = run.optString("finished_at")
+                                .takeIf { it.isNotBlank() },
+                            symbolCount = run.optInt(
+                                "symbol_count",
+                                0
+                            )
+                        )
+                    )
+                }
+            }
+
+            SandboxRunsResponse(
+                stats = stats,
+                runs = runs
+            )
+        }
+    }
 }
