@@ -1,26 +1,43 @@
 package com.mahify.autopatch.ui.screens
 
+import android.content.Context
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.ListAlt
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
@@ -36,10 +53,13 @@ import com.mahify.autopatch.ui.components.QuickActionCard
 import com.mahify.autopatch.ui.components.SectionHeader
 import com.mahify.autopatch.ui.components.StatCard
 import com.mahify.autopatch.ui.components.SystemStatusCard
+import com.mahify.autopatch.ui.theme.BorderSubtle
 import com.mahify.autopatch.ui.theme.StatusError
 import com.mahify.autopatch.ui.theme.StatusOnline
 import com.mahify.autopatch.ui.theme.StatusWarning
+import com.mahify.autopatch.ui.theme.SurfaceElevation1
 import com.mahify.autopatch.ui.theme.TextPrimary
+import com.mahify.autopatch.ui.theme.TextSecondary
 
 @Composable
 fun HomeScreen(
@@ -50,6 +70,12 @@ fun HomeScreen(
     homeViewModel: HomeViewModel = viewModel()
 ) {
     val uiState by homeViewModel.uiState.collectAsState()
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(Unit) {
+        homeViewModel.loadPendingApproval(context)
+    }
 
     val engineHealth = when {
         uiState.isLoading -> HealthState.UNKNOWN
@@ -84,6 +110,31 @@ fun HomeScreen(
                 statusLabel = engineLabel,
                 description = engineDescription
             )
+        }
+
+        /*
+         * Android approval gate.
+         *
+         * This becomes visible only when the backend reports
+         * a pending sandbox approval for this device.
+         */
+        uiState.pendingApproval?.let { approval ->
+
+            item {
+                ApprovalCard(
+                    repository = approval.repository,
+                    gate = approval.gate,
+                    expiresAt = approval.expiresAt,
+                    loading = uiState.approvalLoading,
+                    error = uiState.approvalError,
+                    onApprove = {
+                        homeViewModel.approvePendingApproval(context)
+                    },
+                    onRefresh = {
+                        homeViewModel.loadPendingApproval(context)
+                    }
+                )
+            }
         }
 
         item {
@@ -206,6 +257,133 @@ fun HomeScreen(
     }
 }
 
+
+@Composable
+private fun ApprovalCard(
+    repository: String,
+    gate: String,
+    expiresAt: String?,
+    loading: Boolean,
+    error: String?,
+    onApprove: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                SurfaceElevation1,
+                RoundedCornerShape(16.dp)
+            )
+            .border(
+                1.dp,
+                BorderSubtle,
+                RoundedCornerShape(16.dp)
+            )
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .background(
+                        StatusWarning.copy(alpha = 0.15f),
+                        RoundedCornerShape(12.dp)
+                    )
+                    .padding(10.dp)
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = Icons.Outlined.Security,
+                    contentDescription = null,
+                    tint = StatusWarning
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = "Approval Required",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TextPrimary
+                )
+
+                Text(
+                    text = "Sandbox provisioning is waiting.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+        }
+
+        Text(
+            text = repository,
+            style = MaterialTheme.typography.titleSmall,
+            color = TextPrimary
+        )
+
+        Text(
+            text = "Gate: ${gate.replace('_', ' ')}",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary
+        )
+
+        expiresAt?.let {
+            Text(
+                text = "Approval expires soon",
+                style = MaterialTheme.typography.labelSmall,
+                color = StatusWarning
+            )
+        }
+
+        if (!error.isNullOrBlank()) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.bodySmall,
+                color = StatusError
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = onRefresh,
+                enabled = !loading,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Refresh")
+            }
+
+            Button(
+                onClick = onApprove,
+                enabled = !loading,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = StatusOnline
+                )
+            ) {
+                if (loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .height(18.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                } else {
+                    Text("Approve")
+                }
+            }
+        }
+    }
+}
+
+
 @Composable
 private fun SystemStatusGrid(
     backendOnline: Boolean,
@@ -322,6 +500,7 @@ private fun SystemStatusGrid(
     }
 }
 
+
 private fun SandboxRun.toPatchActivity(): PatchActivity {
     return PatchActivity(
         id = id.toString(),
@@ -339,6 +518,7 @@ private fun SandboxRun.toPatchActivity(): PatchActivity {
         )
     )
 }
+
 
 private fun formatTimeAgo(
     startedAt: String?,

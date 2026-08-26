@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
-from app.models import Repository, SandboxRun, Symbol
+from app.models import ApprovalGate, Repository, SandboxRun, Symbol
 from app.services import e2b_runner, indexer
 from app.services.github_app import (
     clone_url,
@@ -15,6 +15,21 @@ def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
 
     run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+
+    gate = (
+        db.query(ApprovalGate)
+        .filter(
+            ApprovalGate.run_id == run.id,
+            ApprovalGate.gate == "sandbox_provision",
+        )
+        .one_or_none()
+    )
+
+    if gate is None or gate.status != "approved":
+        db.close()
+        raise RuntimeError(
+            "sandbox provisioning requires Android approval"
+        )
 
     started = datetime.now(timezone.utc)
 

@@ -6,6 +6,10 @@ class SandboxRunCreate(BaseModel):
     ref: str = "main"
 
 
+class ApprovalRequest(BaseModel):
+    device_id: str = Field(min_length=1)
+
+
 class DeviceRegister(BaseModel):
     device_id: str = Field(min_length=1)
     fcm_token: str = Field(min_length=1)

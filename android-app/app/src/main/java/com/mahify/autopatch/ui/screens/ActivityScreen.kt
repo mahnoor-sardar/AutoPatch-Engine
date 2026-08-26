@@ -1,6 +1,4 @@
 package com.mahify.autopatch.ui.screens
-import com.mahify.autopatch.model.PatchActivity
-import com.mahify.autopatch.model.PatchStatus
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -10,6 +8,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -19,6 +18,8 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mahify.autopatch.ApiClient
 import com.mahify.autopatch.SandboxRun
+import com.mahify.autopatch.model.PatchActivity
+import com.mahify.autopatch.model.PatchStatus
 import com.mahify.autopatch.ui.components.ActivityItem
 import com.mahify.autopatch.ui.components.NoActivityYet
 import com.mahify.autopatch.ui.theme.AccentPrimary
@@ -30,6 +31,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.time.Duration
+import java.time.Instant
+
 
 enum class ActivityFilter {
     ALL,
@@ -38,11 +42,13 @@ enum class ActivityFilter {
     FAILED
 }
 
+
 data class ActivityUiState(
     val runs: List<SandboxRun> = emptyList(),
     val isLoading: Boolean = true,
     val error: String? = null
 )
+
 
 class ActivityViewModel : ViewModel() {
 
@@ -57,6 +63,7 @@ class ActivityViewModel : ViewModel() {
 
     fun loadActivity() {
         viewModelScope.launch {
+
             _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 error = null
@@ -70,7 +77,9 @@ class ActivityViewModel : ViewModel() {
                     isLoading = false,
                     error = null
                 )
+
             } catch (e: Exception) {
+
                 _uiState.value = ActivityUiState(
                     runs = emptyList(),
                     isLoading = false,
@@ -82,13 +91,66 @@ class ActivityViewModel : ViewModel() {
     }
 }
 
+
+private fun formatTimeAgo(timestamp: String?): String {
+
+    if (timestamp.isNullOrBlank()) {
+        return "Unknown time"
+    }
+
+    return try {
+
+        val instant = Instant.parse(timestamp)
+        val now = Instant.now()
+
+        val seconds = Duration.between(
+            instant,
+            now
+        ).seconds.coerceAtLeast(0)
+
+        when {
+
+            seconds < 60 ->
+                "Just now"
+
+            seconds < 3600 ->
+                "${seconds / 60} min ago"
+
+            seconds < 86400 ->
+                "${seconds / 3600} hr ago"
+
+            seconds < 172800 ->
+                "1 day ago"
+
+            else ->
+                "${seconds / 86400} days ago"
+        }
+
+    } catch (e: Exception) {
+
+        "Unknown time"
+    }
+}
+
+
 private fun SandboxRun.toPatchActivity(): PatchActivity {
+
     val patchStatus = when (status.lowercase()) {
-        "completed" -> PatchStatus.COMPLETED
-        "running" -> PatchStatus.RUNNING
-        "failed" -> PatchStatus.FAILED
-        "queued" -> PatchStatus.QUEUED
-        else -> PatchStatus.QUEUED
+
+        "completed" ->
+            PatchStatus.COMPLETED
+
+        "running" ->
+            PatchStatus.RUNNING
+
+        "failed" ->
+            PatchStatus.FAILED
+
+        "queued" ->
+            PatchStatus.QUEUED
+
+        else ->
+            PatchStatus.QUEUED
     }
 
     return PatchActivity(
@@ -96,17 +158,19 @@ private fun SandboxRun.toPatchActivity(): PatchActivity {
         patchNumber = "#$id",
         repository = repo,
         status = patchStatus,
-        timeAgo = finishedAt
-            ?: startedAt
-            ?: "No timestamp"
+        timeAgo = formatTimeAgo(
+            finishedAt ?: startedAt
+        )
     )
 }
+
 
 @Composable
 fun ActivityScreen(
     modifier: Modifier = Modifier,
     activityViewModel: ActivityViewModel = viewModel()
 ) {
+
     val uiState by activityViewModel.uiState.collectAsState()
 
     var selectedFilter by remember {
@@ -117,148 +181,249 @@ fun ActivityScreen(
         uiState.runs,
         selectedFilter
     ) {
+
         when (selectedFilter) {
-            ActivityFilter.ALL -> uiState.runs
 
-            ActivityFilter.RUNNING -> uiState.runs.filter {
-                it.status.equals("running", ignoreCase = true) ||
-                    it.status.equals("queued", ignoreCase = true)
-            }
+            ActivityFilter.ALL ->
+                uiState.runs
 
-            ActivityFilter.COMPLETED -> uiState.runs.filter {
-                it.status.equals("completed", ignoreCase = true)
-            }
+            ActivityFilter.RUNNING ->
+                uiState.runs.filter {
+                    it.status.equals(
+                        "running",
+                        ignoreCase = true
+                    ) ||
+                        it.status.equals(
+                            "queued",
+                            ignoreCase = true
+                        )
+                }
 
-            ActivityFilter.FAILED -> uiState.runs.filter {
-                it.status.equals("failed", ignoreCase = true)
-            }
+            ActivityFilter.COMPLETED ->
+                uiState.runs.filter {
+                    it.status.equals(
+                        "completed",
+                        ignoreCase = true
+                    )
+                }
+
+            ActivityFilter.FAILED ->
+                uiState.runs.filter {
+                    it.status.equals(
+                        "failed",
+                        ignoreCase = true
+                    )
+                }
         }
     }
 
     Column(
         modifier = modifier.fillMaxSize()
     ) {
-        Column(
-            modifier = Modifier.padding(
-                horizontal = 20.dp,
-                vertical = 16.dp
-            )
+
+        /*
+         * Activity header + Refresh button
+         */
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = 20.dp,
+                    vertical = 16.dp
+                ),
+            horizontalArrangement =
+                Arrangement.SpaceBetween,
+            verticalAlignment =
+                Alignment.CenterVertically
         ) {
-            Text(
-                text = "Activity",
-                style = MaterialTheme.typography.headlineSmall,
-                color = TextPrimary
-            )
 
-            Spacer(Modifier.height(4.dp))
+            Column {
 
-            Text(
-                text = "All patch runs across your repositories.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary
-            )
+                Text(
+                    text = "Activity",
+                    style =
+                        MaterialTheme.typography.headlineSmall,
+                    color = TextPrimary
+                )
+
+                Spacer(
+                    modifier = Modifier.height(4.dp)
+                )
+
+                Text(
+                    text =
+                        "All patch runs across your repositories.",
+                    style =
+                        MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+
+            TextButton(
+                onClick = {
+                    activityViewModel.loadActivity()
+                },
+                enabled = !uiState.isLoading
+            ) {
+
+                Text(
+                    text = "Refresh",
+                    color = AccentPrimary
+                )
+            }
         }
 
+
+        /*
+         * Filters
+         */
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement =
+                Arrangement.spacedBy(8.dp)
         ) {
+
             FilterOption(
                 label = "All",
-                selected = selectedFilter == ActivityFilter.ALL
+                selected =
+                    selectedFilter == ActivityFilter.ALL
             ) {
-                selectedFilter = ActivityFilter.ALL
+                selectedFilter =
+                    ActivityFilter.ALL
             }
 
             FilterOption(
                 label = "Running",
-                selected = selectedFilter == ActivityFilter.RUNNING
+                selected =
+                    selectedFilter == ActivityFilter.RUNNING
             ) {
-                selectedFilter = ActivityFilter.RUNNING
+                selectedFilter =
+                    ActivityFilter.RUNNING
             }
 
             FilterOption(
                 label = "Completed",
-                selected = selectedFilter == ActivityFilter.COMPLETED
+                selected =
+                    selectedFilter == ActivityFilter.COMPLETED
             ) {
-                selectedFilter = ActivityFilter.COMPLETED
+                selectedFilter =
+                    ActivityFilter.COMPLETED
             }
 
             FilterOption(
                 label = "Failed",
-                selected = selectedFilter == ActivityFilter.FAILED
+                selected =
+                    selectedFilter == ActivityFilter.FAILED
             ) {
-                selectedFilter = ActivityFilter.FAILED
+                selectedFilter =
+                    ActivityFilter.FAILED
             }
         }
 
-        Spacer(Modifier.height(14.dp))
 
+        Spacer(
+            modifier = Modifier.height(14.dp)
+        )
+
+
+        /*
+         * Content states
+         */
         when {
+
             uiState.isLoading -> {
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentAlignment = Alignment.Center
+                    contentAlignment =
+                        Alignment.Center
                 ) {
+
                     CircularProgressIndicator(
                         color = AccentPrimary
                     )
                 }
             }
 
+
             uiState.error != null -> {
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                         .padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    horizontalAlignment =
+                        Alignment.CenterHorizontally,
+                    verticalArrangement =
+                        Arrangement.Center
                 ) {
+
                     Text(
                         text = "Unable to load activity",
-                        style = MaterialTheme.typography.titleMedium,
+                        style =
+                            MaterialTheme.typography.titleMedium,
                         color = TextPrimary
                     )
 
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(
+                        modifier = Modifier.height(6.dp)
+                    )
 
                     Text(
-                        text = uiState.error ?: "Unknown error",
-                        style = MaterialTheme.typography.bodySmall,
+                        text =
+                            uiState.error
+                                ?: "Unknown error",
+                        style =
+                            MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
                 }
             }
 
+
             filteredRuns.isEmpty() -> {
+
                 NoActivityYet()
             }
 
+
             else -> {
+
                 LazyColumn(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(
-                        horizontal = 20.dp,
-                        vertical = 4.dp
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+
+                    contentPadding =
+                        PaddingValues(
+                            horizontal = 20.dp,
+                            vertical = 4.dp
+                        ),
+
+                    verticalArrangement =
+                        Arrangement.spacedBy(10.dp)
                 ) {
+
                     items(
                         items = filteredRuns,
                         key = { it.id }
                     ) { run ->
+
                         ActivityItem(
-                            activity = run.toPatchActivity()
+                            activity =
+                                run.toPatchActivity()
                         )
                     }
 
                     item {
-                        Spacer(Modifier.height(12.dp))
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(12.dp)
+                        )
                     }
                 }
             }
@@ -266,26 +431,41 @@ fun ActivityScreen(
     }
 }
 
+
 @Composable
 private fun FilterOption(
     label: String,
     selected: Boolean,
     onClick: () -> Unit
 ) {
+
     FilterChip(
         selected = selected,
         onClick = onClick,
+
         label = {
+
             Text(
-                label,
-                style = MaterialTheme.typography.labelMedium
+                text = label,
+                style =
+                    MaterialTheme.typography.labelMedium
             )
         },
-        colors = FilterChipDefaults.filterChipColors(
-            containerColor = SurfaceElevation1,
-            labelColor = TextSecondary,
-            selectedContainerColor = AccentPrimaryMuted,
-            selectedLabelColor = AccentPrimary
-        )
+
+        colors =
+            FilterChipDefaults.filterChipColors(
+
+                containerColor =
+                    SurfaceElevation1,
+
+                labelColor =
+                    TextSecondary,
+
+                selectedContainerColor =
+                    AccentPrimaryMuted,
+
+                selectedLabelColor =
+                    AccentPrimary
+            )
     )
 }

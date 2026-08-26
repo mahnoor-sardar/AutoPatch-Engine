@@ -8,15 +8,25 @@ import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.Terminal
 
 /** Generic health state shared by the hero card and system cards. */
-enum class HealthState { ONLINE, DEGRADED, OFFLINE, UNKNOWN }
+enum class HealthState {
+    ONLINE,
+    DEGRADED,
+    OFFLINE,
+    UNKNOWN
+}
 
 /** Status of an individual patch run. */
-enum class PatchStatus { RUNNING, COMPLETED, FAILED, QUEUED }
+enum class PatchStatus {
+    RUNNING,
+    COMPLETED,
+    FAILED,
+    QUEUED
+}
 
 data class SystemStatus(
     val id: String,
     val name: String,
-    val statusLabel: String,   // e.g. "Connected", "Ready", "Disconnected"
+    val statusLabel: String,
     val description: String,
     val health: HealthState,
     val icon: ImageVector
@@ -24,7 +34,7 @@ data class SystemStatus(
 
 data class PatchActivity(
     val id: String,
-    val patchNumber: String,   // "#104"
+    val patchNumber: String,
     val repository: String,
     val status: PatchStatus,
     val timeAgo: String
@@ -35,6 +45,13 @@ data class PatchStats(
     val successful: Int,
     val running: Int,
     val failed: Int
+)
+
+data class ApprovalRequest(
+    val runId: Int,
+    val repository: String,
+    val gate: String,
+    val expiresAt: String?
 )
 
 /** Mock data only — no networking, no persistence. Swap for real state upstream. */
@@ -76,13 +93,47 @@ object MockData {
     )
 
     val recentActivity = listOf(
-        PatchActivity("1", "#104", "AutoPatch-Engine", PatchStatus.COMPLETED, "2 min ago"),
-        PatchActivity("2", "#103", "AutoPatch-Engine", PatchStatus.RUNNING, "8 min ago"),
-        PatchActivity("3", "#102", "Backend", PatchStatus.FAILED, "24 min ago"),
-        PatchActivity("4", "#101", "AutoPatch-Engine", PatchStatus.COMPLETED, "1 hr ago"),
-        PatchActivity("5", "#100", "Backend", PatchStatus.COMPLETED, "3 hr ago")
+        PatchActivity(
+            "1",
+            "#104",
+            "AutoPatch-Engine",
+            PatchStatus.COMPLETED,
+            "2 min ago"
+        ),
+        PatchActivity(
+            "2",
+            "#103",
+            "AutoPatch-Engine",
+            PatchStatus.RUNNING,
+            "8 min ago"
+        ),
+        PatchActivity(
+            "3",
+            "#102",
+            "Backend",
+            PatchStatus.FAILED,
+            "24 min ago"
+        ),
+        PatchActivity(
+            "4",
+            "#101",
+            "AutoPatch-Engine",
+            PatchStatus.COMPLETED,
+            "1 hr ago"
+        ),
+        PatchActivity(
+            "5",
+            "#100",
+            "Backend",
+            PatchStatus.COMPLETED,
+            "3 hr ago"
+        )
     )
 
-    val stats = PatchStats(total = 24, successful = 21, running = 2, failed = 1)
+    val stats = PatchStats(
+        total = 24,
+        successful = 21,
+        running = 2,
+        failed = 1
+    )
 }
-

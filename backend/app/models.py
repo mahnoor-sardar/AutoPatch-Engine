@@ -46,8 +46,44 @@ class SandboxRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    approval_gates: Mapped[list["ApprovalGate"]] = relationship(
+        back_populates="run"
+    )
     symbols: Mapped[list["Symbol"]] = relationship(back_populates="run")
 
+class ApprovalGate(Base):
+    __tablename__ = "approval_gates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("sandbox_runs.id"),
+        index=True,
+    )
+    gate: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending",
+    )
+    device_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    run: Mapped[SandboxRun] = relationship(
+        back_populates="approval_gates"
+    )
 
 class Symbol(Base):
     __tablename__ = "symbols"
