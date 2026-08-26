@@ -37,6 +37,7 @@ def create_run(
         status="queued",
         repo=body.repo,
         ref=body.ref,
+        stack_trace=body.stack_trace,
     )
 
     db.add(run)
