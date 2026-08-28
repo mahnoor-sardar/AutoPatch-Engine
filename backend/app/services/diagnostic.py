@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 
 from app.services.stacktrace import StackFrame
 
@@ -15,6 +16,7 @@ class DiagnosticLocation:
 def locate_frames(
     frames: list[StackFrame],
     symbols: list[dict],
+    sources: dict[str, str] | None = None,
 ) -> list[DiagnosticLocation]:
 
     results: list[DiagnosticLocation] = []
@@ -84,5 +86,48 @@ def locate_frames(
                 confidence="medium",
             )
         )
+
+    if not results and sources:
+        from app.services.ripgrep import search_repo
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as root:
+            for path, source in sources.items():
+                dest = Path(root) / path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(source, encoding="utf-8")
+            for frame in frames:
+                needle = frame.function or ""
+                if not needle:
+                    continue
+                output = search_repo(root, needle)
+                first = next(
+                    (line for line in output.splitlines() if line.strip()),
+                    "",
+                )
+                if not first:
+                    continue
+                match = re.search(r":(\d+):", first)
+                if not match:
+                    continue
+                abs_path = first[: match.start()]
+                try:
+                    rel = Path(abs_path).resolve().relative_to(Path(root).resolve()).as_posix()
+                except ValueError:
+                    rel = Path(abs_path).as_posix()
+                try:
+                    line_no = int(match.group(1))
+                except ValueError:
+                    line_no = frame.line
+                results.append(
+                    DiagnosticLocation(
+                        path=rel,
+                        name=needle,
+                        kind="function",
+                        start_line=line_no,
+                        confidence="low",
+                    )
+                )
 
     return results

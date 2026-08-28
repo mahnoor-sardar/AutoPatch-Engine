@@ -36,8 +36,8 @@ android {
         applicationId = "com.mahify.autopatch"
         minSdk = 24
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner =
             "androidx.test.runner.AndroidJUnitRunner"
@@ -97,8 +97,13 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.firebase:firebase-messaging:24.1.2")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20250107")
 
     androidTestImplementation(
         platform(libs.androidx.compose.bom)

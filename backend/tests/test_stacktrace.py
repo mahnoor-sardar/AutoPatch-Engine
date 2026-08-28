@@ -53,3 +53,15 @@ def test_invalid_trace_returns_empty_result():
     assert result.exception_type is None
     assert result.message is None
     assert result.frames == []
+
+
+def test_parse_javascript_stack():
+    trace = """TypeError: Cannot read properties of null
+    at getUser (app/services/user.js:42:5)
+    at main (app/main.js:10:1)
+"""
+    result = parse_stack_trace(trace)
+    assert len(result.frames) >= 1
+    assert result.frames[0].file == "app/services/user.js"
+    assert result.frames[0].line == 42
+    assert result.frames[0].function == "getUser"

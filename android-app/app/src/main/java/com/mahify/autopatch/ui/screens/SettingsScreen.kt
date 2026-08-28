@@ -17,7 +17,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.mahify.autopatch.model.MockData
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mahify.autopatch.HomeViewModel
+import com.mahify.autopatch.model.HealthState
+import com.mahify.autopatch.model.SystemStatus
 import com.mahify.autopatch.ui.components.SectionHeader
 import com.mahify.autopatch.ui.components.SystemStatusCard
 import com.mahify.autopatch.ui.theme.AccentPrimary
@@ -28,9 +33,15 @@ import com.mahify.autopatch.ui.theme.TextSecondary
 
 @Composable
 fun SettingsScreen(modifier: Modifier = Modifier) {
+    val homeViewModel: HomeViewModel = viewModel()
+    val uiState by homeViewModel.uiState.collectAsState()
     var pushNotifications by remember { mutableStateOf(true) }
     var failureAlertsOnly by remember { mutableStateOf(false) }
     var darkModeLocked by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        homeViewModel.refresh()
+    }
 
     Column(
         modifier = modifier
@@ -51,7 +62,17 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionHeader(title = "Connections")
-            MockData.systems.chunked(2).forEach { row ->
+            val liveSystems = listOf(
+                SystemStatus(
+                    id = "backend",
+                    name = "Backend",
+                    statusLabel = if (uiState.backendOnline) "Connected" else "Offline",
+                    description = uiState.error ?: "API health",
+                    health = if (uiState.backendOnline) HealthState.ONLINE else HealthState.OFFLINE,
+                    icon = com.mahify.autopatch.model.MockData.systems[0].icon
+                )
+            )
+            liveSystems.chunked(2).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     row.forEach { system ->
                         SystemStatusCard(system = system, modifier = Modifier.weight(1f))

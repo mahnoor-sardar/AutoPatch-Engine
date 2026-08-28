@@ -19,11 +19,19 @@ def _ensure_app() -> None:
     firebase_admin.initialize_app(credentials.Certificate(str(resolved)))
 
 
-def send_push(token: str, title: str, body: str) -> str:
+def send_push(
+    token: str,
+    title: str,
+    body: str,
+    data: dict[str, str] | None = None,
+) -> str:
     _ensure_app()
+    payload = {"title": title, "body": body}
+    if data:
+        payload.update({key: str(value) for key, value in data.items()})
     message = messaging.Message(
         notification=messaging.Notification(title=title, body=body),
-        data={"title": title, "body": body},
+        data=payload,
         token=token,
     )
     return messaging.send(message)

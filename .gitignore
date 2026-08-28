@@ -43,3 +43,6 @@ Thumbs.db
 # Local data
 *.db
 infra/data/
+
+# Local phase copies
+AutoPatch-Engine-phase34/

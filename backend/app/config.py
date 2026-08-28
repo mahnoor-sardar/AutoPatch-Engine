@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -24,7 +24,23 @@ class Settings(BaseSettings):
     github_app_private_key_path: str = ""
     github_webhook_secret: str
 
+    sentry_webhook_secret: str = ""
+    datadog_webhook_secret: str = ""
+
     e2b_api_key: str = ""
+    e2b_template: str = "autopatch-sandbox"
+
+    # Temporary audit stop: after reproduction, skip LLM patch / PR.
+    # Default OFF. Production must leave this false.
+    autopatch_stop_after_repro: bool = False
+
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o"
+    llm_api_base: str = ""
+    embedding_model: str = "text-embedding-3-small"
+
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.0-flash"
 
 
 settings = Settings()

@@ -24,7 +24,7 @@ data class HomeUiState(
 
     val recentRuns: List<SandboxRun> = emptyList(),
 
-    val pendingApproval: com.mahify.autopatch.model.ApprovalRequest? = null,
+    val pendingApprovals: List<com.mahify.autopatch.model.ApprovalRequest> = emptyList(),
     val approvalLoading: Boolean = false,
     val approvalError: String? = null,
 
@@ -121,11 +121,12 @@ class HomeViewModel : ViewModel() {
                     return@launch
                 }
 
-                val approvals =
+                val approvals = ApprovalSubmit.newestRunFirst(
                     ApiClient.getPendingApprovals(deviceId)
+                )
 
                 _uiState.value = _uiState.value.copy(
-                    pendingApproval = approvals.firstOrNull(),
+                    pendingApprovals = approvals,
                     approvalError = null
                 )
 
@@ -139,9 +140,144 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    fun approvePendingApproval(context: Context) {
-        val approval = _uiState.value.pendingApproval
-            ?: return
+    fun approvePendingApproval(
+        context: Context,
+        displayed: com.mahify.autopatch.model.ApprovalRequest,
+        otpCode: String
+    ) {
+        submitApproval(context, displayed = displayed, otpCode = otpCode)
+    }
+
+    fun rejectPendingApproval(
+        context: Context,
+        displayed: com.mahify.autopatch.model.ApprovalRequest,
+        otpCode: String
+    ) {
+        val submitRunId = ApprovalSubmit.runIdForDisplayedRequest(displayed)
+        val trimmedOtp = otpCode.trim()
+        if (!trimmedOtp.matches(Regex("^\\d{6}$"))) {
+            _uiState.value = _uiState.value.copy(
+                approvalError = "Enter a valid 6-digit OTP"
+            )
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(approvalLoading = true)
+            try {
+                ApiClient.rejectSandbox(
+                    submitRunId,
+                    getDeviceId(context),
+                    trimmedOtp
+                )
+                _uiState.value = _uiState.value.copy(
+                    pendingApprovals = _uiState.value.pendingApprovals
+                        .filterNot { it.runId == submitRunId },
+                    approvalLoading = false
+                )
+                refresh()
+                loadPendingApproval(context)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    approvalLoading = false,
+                    approvalError = e.message ?: "Reject failed"
+                )
+            }
+        }
+    }
+
+    fun approveWithStoredSecret(
+        context: Context,
+        displayed: com.mahify.autopatch.model.ApprovalRequest
+    ) {
+        val secret = DevicePrefs.totpSecret(context)
+        if (secret.isNullOrBlank()) {
+            _uiState.value = _uiState.value.copy(
+                approvalError = "TOTP secret is not stored on this device"
+            )
+            return
+        }
+        submitApproval(
+            context,
+            displayed = displayed,
+            otpCode = Totp.currentCode(secret)
+        )
+    }
+
+    fun approveWithSignedToken(
+        context: Context,
+        displayed: com.mahify.autopatch.model.ApprovalRequest
+    ) {
+        val submitRunId = ApprovalSubmit.runIdForDisplayedRequest(displayed)
+        val gate = displayed.gate
+        val secret = DevicePrefs.totpSecret(context)
+        val deviceId = getDeviceId(context)
+        if (secret.isNullOrBlank()) {
+            _uiState.value = _uiState.value.copy(
+                approvalError = "TOTP secret is not stored on this device"
+            )
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(approvalLoading = true)
+            try {
+                val ts = System.currentTimeMillis() / 1000L
+                val payload = "$deviceId|$submitRunId|$gate"
+                ApiClient.approveWithToken(
+                    submitRunId,
+                    deviceId,
+                    Totp.approvalToken(secret, payload, ts),
+                    ts
+                )
+                _uiState.value = _uiState.value.copy(
+                    pendingApprovals = _uiState.value.pendingApprovals
+                        .filterNot { it.runId == submitRunId },
+                    approvalLoading = false
+                )
+                refresh()
+                loadPendingApproval(context)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    approvalLoading = false,
+                    approvalError = e.message ?: "Approval failed"
+                )
+            }
+        }
+    }
+
+    fun controlRun(context: Context, runId: Int, action: String, otpCode: String) {
+        viewModelScope.launch {
+            try {
+                ApiClient.controlRun(
+                    runId,
+                    action,
+                    getDeviceId(context),
+                    otpCode.trim()
+                )
+                refresh()
+                loadPendingApproval(context)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    error = e.message ?: "Control failed"
+                )
+            }
+        }
+    }
+
+    private fun submitApproval(
+        context: Context,
+        displayed: com.mahify.autopatch.model.ApprovalRequest,
+        otpCode: String
+    ) {
+        val submitRunId = ApprovalSubmit.runIdForDisplayedRequest(displayed)
+
+        val trimmedOtp = otpCode.trim()
+
+        if (!trimmedOtp.matches(Regex("^\\d{6}$"))) {
+            _uiState.value = _uiState.value.copy(
+                approvalError = "Enter a valid 6-digit OTP"
+            )
+            return
+        }
 
         viewModelScope.launch {
 
@@ -154,17 +290,20 @@ class HomeViewModel : ViewModel() {
                 val deviceId = getDeviceId(context)
 
                 ApiClient.approveSandbox(
-                    runId = approval.runId,
-                    deviceId = deviceId
+                    runId = submitRunId,
+                    deviceId = deviceId,
+                    otpCode = trimmedOtp
                 )
 
                 _uiState.value = _uiState.value.copy(
-                    pendingApproval = null,
+                    pendingApprovals = _uiState.value.pendingApprovals
+                        .filterNot { it.runId == submitRunId },
                     approvalLoading = false,
                     approvalError = null
                 )
 
                 refresh()
+                loadPendingApproval(context)
 
             } catch (e: Exception) {
 
@@ -179,5 +318,9 @@ class HomeViewModel : ViewModel() {
 
     fun refreshHealth() {
         refresh()
+    }
+
+    fun setApprovalError(message: String) {
+        _uiState.value = _uiState.value.copy(approvalError = message)
     }
 }

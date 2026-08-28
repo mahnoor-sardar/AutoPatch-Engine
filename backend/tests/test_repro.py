@@ -1,5 +1,5 @@
 from app.services.diagnostic import DiagnosticLocation
-from app.services.repro import synthesize_python_repro
+from app.services.repro import synthesize_javascript_repro, synthesize_python_repro
 
 
 def test_synthesize_python_repro():
@@ -26,6 +26,26 @@ def test_synthesize_python_repro():
     assert "def test_reproduces_calculate_failure" in result.test_source
     assert "ZeroDivisionError" in result.test_source
     assert "calculate()" in result.test_source
+
+
+def test_synthesize_python_repro_uses_dummy_arguments():
+    location = DiagnosticLocation(
+        path="app/services/math.py",
+        name="add",
+        kind="function",
+        start_line=1,
+        confidence="high",
+    )
+    source = """def add(a, b):
+    return a + b
+"""
+    result = synthesize_python_repro(
+        location=location,
+        source=source,
+        exception_type="TypeError",
+        message="unsupported",
+    )
+    assert "add(None, None)" in result.test_source
     
 
 def test_synthesize_repro_rejects_non_python_file():
@@ -52,3 +72,24 @@ def test_synthesize_repro_rejects_non_python_file():
         raise AssertionError(
             "Expected ValueError for non-Python source"
         )
+
+
+def test_synthesize_javascript_repro_uses_dummy_args_and_esm():
+    location = DiagnosticLocation(
+        path="src/math.ts",
+        name="add",
+        kind="function",
+        start_line=1,
+        confidence="high",
+    )
+    source = "export function add(a: number, b: number) { return a + b }"
+    result = synthesize_javascript_repro(
+        location=location,
+        source=source,
+        exception_type="Error",
+        message="fail",
+    )
+    assert result.test_path.endswith(".ts")
+    assert "undefined, undefined" in result.test_source
+    assert "import(" in result.test_source
+    assert "node:test" in result.test_source

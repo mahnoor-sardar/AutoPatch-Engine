@@ -65,6 +65,10 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
     fake_sandbox = SimpleNamespace(
         sandbox_id="worker-test-sandbox",
         kill=lambda: None,
+        files=SimpleNamespace(write=lambda *a, **k: None),
+        commands=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(stdout="", stderr="")),
+        write_file=lambda *a, **k: None,
+        run=lambda *a, **k: SimpleNamespace(stdout="", stderr=""),
     )
 
     def fake_clone_and_read_sources_in_sandbox(
@@ -84,6 +88,7 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
         sandbox,
         test_path,
         test_source,
+        **kwargs,
     ):
         return FakeResult()
 
@@ -101,6 +106,15 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
         "app.workers.tasks.run_reproduction_test",
         fake_run_reproduction_test,
     )
+    monkeypatch.setattr(
+        "app.workers.tasks.e2b_runner.install_project_dependencies",
+        lambda sandbox: (0, "", ""),
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.generate_patch",
+        lambda **kwargs: "diff --git a/x b/x\n--- a/x\n+++ b/x\n",
+    )
+    monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
 
     clone_and_index.run(run_id)
 
@@ -121,7 +135,7 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
             .one()
         )
 
-        assert run.status == "completed"
+        assert run.status == "awaiting_patch_review"
 
         assert attempt.diagnostic_path == (
             "backend/app/services/math.py"

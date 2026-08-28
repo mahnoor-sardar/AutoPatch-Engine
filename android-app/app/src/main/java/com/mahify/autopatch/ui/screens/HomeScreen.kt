@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Dns
@@ -30,19 +31,26 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
+import com.mahify.autopatch.ApprovalSubmit
 import com.mahify.autopatch.HomeViewModel
 import com.mahify.autopatch.SandboxRun
+import com.mahify.autopatch.model.ApprovalRequest
 import com.mahify.autopatch.model.HealthState
 import com.mahify.autopatch.model.PatchActivity
 import com.mahify.autopatch.model.PatchStatus
@@ -118,23 +126,46 @@ fun HomeScreen(
          * This becomes visible only when the backend reports
          * a pending sandbox approval for this device.
          */
-        uiState.pendingApproval?.let { approval ->
-
-            item {
-                ApprovalCard(
-                    repository = approval.repository,
-                    gate = approval.gate,
-                    expiresAt = approval.expiresAt,
-                    loading = uiState.approvalLoading,
-                    error = uiState.approvalError,
-                    onApprove = {
-                        homeViewModel.approvePendingApproval(context)
-                    },
-                    onRefresh = {
-                        homeViewModel.loadPendingApproval(context)
-                    }
-                )
-            }
+        items(
+            ApprovalSubmit.newestRunFirst(uiState.pendingApprovals),
+            key = { ApprovalSubmit.itemKey(it) }
+        ) { approval ->
+            ApprovalCard(
+                approval = approval,
+                loading = uiState.approvalLoading,
+                error = uiState.approvalError,
+                onApprove = { otpCode ->
+                    homeViewModel.approvePendingApproval(
+                        context,
+                        approval,
+                        otpCode
+                    )
+                },
+                onReject = { otpCode ->
+                    homeViewModel.rejectPendingApproval(
+                        context,
+                        approval,
+                        otpCode
+                    )
+                },
+                onBiometric = {
+                    requestBiometricApproval(
+                        context,
+                        onSuccess = {
+                            homeViewModel.approveWithSignedToken(
+                                context,
+                                approval
+                            )
+                        },
+                        onError = { message ->
+                            homeViewModel.setApprovalError(message)
+                        }
+                    )
+                },
+                onRefresh = {
+                    homeViewModel.loadPendingApproval(context)
+                }
+            )
         }
 
         item {
@@ -166,6 +197,7 @@ fun HomeScreen(
                         icon = Icons.Outlined.Refresh,
                         onClick = {
                             homeViewModel.refresh()
+                            homeViewModel.loadPendingApproval(context)
                         },
                         modifier = Modifier.weight(1f)
                     )
@@ -243,7 +275,7 @@ fun HomeScreen(
         }
 
         items(
-            uiState.recentRuns.take(4),
+            uiState.recentRuns.distinctBy { it.id }.take(4),
             key = { it.id }
         ) { run ->
             ActivityItem(
@@ -260,14 +292,19 @@ fun HomeScreen(
 
 @Composable
 private fun ApprovalCard(
-    repository: String,
-    gate: String,
-    expiresAt: String?,
+    approval: ApprovalRequest,
     loading: Boolean,
     error: String?,
-    onApprove: () -> Unit,
+    onApprove: (otpCode: String) -> Unit,
+    onReject: (otpCode: String) -> Unit,
+    onBiometric: () -> Unit,
     onRefresh: () -> Unit
 ) {
+    val runId = ApprovalSubmit.runIdForDisplayedRequest(approval)
+    val runLabel = ApprovalSubmit.runLabel(runId)
+    var otpCode by remember(runId) { mutableStateOf("") }
+    val otpValid = otpCode.length == 6 && otpCode.all { it.isDigit() }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -307,13 +344,17 @@ private fun ApprovalCard(
                 modifier = Modifier.weight(1f)
             ) {
                 Text(
-                    text = "Approval Required",
+                    text = "Approval required",
                     style = MaterialTheme.typography.titleMedium,
                     color = TextPrimary
                 )
 
                 Text(
-                    text = "Sandbox provisioning is waiting.",
+                    text = when (approval.gate) {
+                        "patch_review" -> "Patch review is waiting."
+                        "merge" -> "Merge authorization is waiting."
+                        else -> "Sandbox provisioning is waiting."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -321,24 +362,63 @@ private fun ApprovalCard(
         }
 
         Text(
-            text = repository,
+            text = runLabel,
+            style = MaterialTheme.typography.headlineMedium,
+            color = StatusWarning
+        )
+
+        Text(
+            text = approval.repository,
             style = MaterialTheme.typography.titleSmall,
             color = TextPrimary
         )
 
         Text(
-            text = "Gate: ${gate.replace('_', ' ')}",
+            text = "Gate: ${approval.gate.replace('_', ' ')}",
             style = MaterialTheme.typography.bodySmall,
             color = TextSecondary
         )
 
-        expiresAt?.let {
+        approval.expiresAt?.let {
             Text(
                 text = "Approval expires soon",
                 style = MaterialTheme.typography.labelSmall,
                 color = StatusWarning
             )
         }
+
+        approval.diff?.let { patch ->
+            Text(
+                text = "Proposed diff",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary
+            )
+            com.mahify.autopatch.ui.components.UnifiedDiffViewer(
+                diff = patch,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(280.dp)
+            )
+        }
+
+        OutlinedTextField(
+            value = otpCode,
+            onValueChange = { value ->
+                otpCode = value.filter { it.isDigit() }.take(6)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            enabled = !loading,
+            label = {
+                Text("6-digit OTP for $runLabel")
+            },
+            placeholder = {
+                Text("000000")
+            },
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.NumberPassword
+            )
+        )
 
         if (!error.isNullOrBlank()) {
             Text(
@@ -360,25 +440,40 @@ private fun ApprovalCard(
                 Text("Refresh")
             }
 
-            Button(
-                onClick = onApprove,
-                enabled = !loading,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = StatusOnline
-                )
+            OutlinedButton(
+                onClick = { onReject(otpCode) },
+                enabled = !loading && otpValid,
+                modifier = Modifier.weight(1f)
             ) {
-                if (loading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier
-                            .height(18.dp),
-                        strokeWidth = 2.dp,
-                        color = Color.White
-                    )
-                } else {
-                    Text("Approve")
-                }
+                Text("Reject $runLabel")
             }
+        }
+
+        Button(
+            onClick = { onApprove(otpCode) },
+            enabled = !loading && otpValid,
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = StatusOnline
+            )
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.height(18.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+            } else {
+                Text("Approve $runLabel")
+            }
+        }
+
+        Button(
+            onClick = onBiometric,
+            enabled = !loading,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Approve $runLabel with biometrics")
         }
     }
 }
@@ -557,4 +652,43 @@ private fun formatTimeAgo(
     } catch (_: Exception) {
         "Unknown time"
     }
+}
+
+private fun requestBiometricApproval(
+    context: android.content.Context,
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val activity = context as? androidx.fragment.app.FragmentActivity
+    if (activity == null) {
+        onError("Biometrics require a FragmentActivity host")
+        return
+    }
+    val executor = androidx.core.content.ContextCompat.getMainExecutor(context)
+    val prompt = androidx.biometric.BiometricPrompt(
+        activity,
+        executor,
+        object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(
+                result: androidx.biometric.BiometricPrompt.AuthenticationResult
+            ) {
+                onSuccess()
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                onError(errString.toString())
+            }
+
+            override fun onAuthenticationFailed() {
+                onError("Biometric authentication failed")
+            }
+        }
+    )
+    prompt.authenticate(
+        androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Approve AutoPatch gate")
+            .setSubtitle("Confirm with fingerprint or face unlock")
+            .setNegativeButtonText("Cancel")
+            .build()
+    )
 }

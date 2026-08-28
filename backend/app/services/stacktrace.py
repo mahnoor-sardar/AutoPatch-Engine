@@ -20,6 +20,10 @@ _FRAME_PATTERN = re.compile(
     r'^\s*File "(.+)", line (\d+), in (.+)$'
 )
 
+_JS_FRAME_PATTERN = re.compile(
+    r"^\s*at (?:(.+?) \()?(?:file://)?([^\s:()]+):(\d+)(?::\d+)?\)?$"
+)
+
 _EXCEPTION_PATTERN = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_.]*)(?::\s*(.*))?$"
 )
@@ -45,6 +49,22 @@ def parse_stack_trace(trace: str) -> StackTrace:
                 function=function.strip(),
             )
         )
+
+    if not frames:
+        for line in lines:
+            js_match = _JS_FRAME_PATTERN.match(line)
+            if js_match is None:
+                continue
+            function, file_path, line_number = js_match.groups()
+            if file_path.startswith("node:") or "node_modules" in file_path:
+                continue
+            frames.append(
+                StackFrame(
+                    file=file_path,
+                    line=int(line_number),
+                    function=(function or "<anonymous>").strip(),
+                )
+            )
 
     exception_type: str | None = None
     message: str | None = None

@@ -1,5 +1,6 @@
 package com.mahify.autopatch.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -9,6 +10,9 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.platform.LocalContext
+import com.mahify.autopatch.HomeViewModel
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +29,7 @@ import com.mahify.autopatch.ui.components.NoActivityYet
 import com.mahify.autopatch.ui.theme.AccentPrimary
 import com.mahify.autopatch.ui.theme.AccentPrimaryMuted
 import com.mahify.autopatch.ui.theme.SurfaceElevation1
+import com.mahify.autopatch.ui.theme.SurfaceElevation2
 import com.mahify.autopatch.ui.theme.TextPrimary
 import com.mahify.autopatch.ui.theme.TextSecondary
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,7 +51,11 @@ enum class ActivityFilter {
 data class ActivityUiState(
     val runs: List<SandboxRun> = emptyList(),
     val isLoading: Boolean = true,
-    val error: String? = null
+    val error: String? = null,
+    val selectedRunId: Int? = null,
+    val diagnosis: String? = null,
+    val diagnosisLoading: Boolean = false,
+    val diagnosisError: String? = null
 )
 
 
@@ -72,7 +81,7 @@ class ActivityViewModel : ViewModel() {
             try {
                 val result = ApiClient.getSandboxRuns()
 
-                _uiState.value = ActivityUiState(
+                _uiState.value = _uiState.value.copy(
                     runs = result.runs,
                     isLoading = false,
                     error = null
@@ -85,6 +94,47 @@ class ActivityViewModel : ViewModel() {
                     isLoading = false,
                     error = e.message
                         ?: "Unable to load activity"
+                )
+            }
+        }
+    }
+
+    fun selectRun(runId: Int) {
+        if (_uiState.value.selectedRunId == runId) {
+            _uiState.value = _uiState.value.copy(
+                selectedRunId = null,
+                diagnosis = null,
+                diagnosisLoading = false,
+                diagnosisError = null
+            )
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                selectedRunId = runId,
+                diagnosis = null,
+                diagnosisLoading = true,
+                diagnosisError = null
+            )
+            try {
+                val result = ApiClient.getRunDiagnosis(runId)
+                if (_uiState.value.selectedRunId != runId) {
+                    return@launch
+                }
+                _uiState.value = _uiState.value.copy(
+                    diagnosis = result.diagnosis,
+                    diagnosisLoading = false,
+                    diagnosisError = null
+                )
+            } catch (e: Exception) {
+                if (_uiState.value.selectedRunId != runId) {
+                    return@launch
+                }
+                _uiState.value = _uiState.value.copy(
+                    diagnosis = null,
+                    diagnosisLoading = false,
+                    diagnosisError = e.message
+                        ?: "Unable to load diagnosis"
                 )
             }
         }
@@ -168,10 +218,13 @@ private fun SandboxRun.toPatchActivity(): PatchActivity {
 @Composable
 fun ActivityScreen(
     modifier: Modifier = Modifier,
-    activityViewModel: ActivityViewModel = viewModel()
+    activityViewModel: ActivityViewModel = viewModel(),
+    homeViewModel: HomeViewModel = viewModel()
 ) {
 
     val uiState by activityViewModel.uiState.collectAsState()
+    val context = LocalContext.current
+    var otpCode by remember { mutableStateOf("") }
 
     var selectedFilter by remember {
         mutableStateOf(ActivityFilter.ALL)
@@ -273,6 +326,41 @@ fun ActivityScreen(
             }
         }
 
+        val running = uiState.runs.firstOrNull {
+            it.status.equals("running", true) ||
+                it.status.equals("paused", true) ||
+                it.controlState.equals("paused", true)
+        }
+        if (running != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "Remote control #${running.id}",
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                OutlinedTextField(
+                    value = otpCode,
+                    onValueChange = { otpCode = it.filter { ch -> ch.isDigit() }.take(6) },
+                    label = { Text("OTP") },
+                    singleLine = true
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = {
+                        homeViewModel.controlRun(context, running.id, "pause", otpCode)
+                    }) { Text("Pause") }
+                    TextButton(onClick = {
+                        homeViewModel.controlRun(context, running.id, "resume", otpCode)
+                    }) { Text("Resume") }
+                    TextButton(onClick = {
+                        homeViewModel.controlRun(context, running.id, "kill", otpCode)
+                    }) { Text("Kill") }
+                }
+            }
+        }
 
         /*
          * Filters
@@ -408,14 +496,29 @@ fun ActivityScreen(
                 ) {
 
                     items(
-                        items = filteredRuns,
+                        items = filteredRuns.distinctBy { it.id },
                         key = { it.id }
                     ) { run ->
 
-                        ActivityItem(
-                            activity =
-                                run.toPatchActivity()
-                        )
+                        Column(
+                            verticalArrangement =
+                                Arrangement.spacedBy(8.dp)
+                        ) {
+                            ActivityItem(
+                                activity =
+                                    run.toPatchActivity(),
+                                onClick = {
+                                    activityViewModel.selectRun(run.id)
+                                }
+                            )
+                            if (uiState.selectedRunId == run.id) {
+                                DiagnosisPanel(
+                                    loading = uiState.diagnosisLoading,
+                                    diagnosis = uiState.diagnosis,
+                                    error = uiState.diagnosisError
+                                )
+                            }
+                        }
                     }
 
                     item {
@@ -426,6 +529,71 @@ fun ActivityScreen(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun DiagnosisPanel(
+    loading: Boolean,
+    diagnosis: String?,
+    error: String?
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                SurfaceElevation2,
+                MaterialTheme.shapes.medium
+            )
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "Gemini diagnosis",
+            style = MaterialTheme.typography.labelMedium,
+            color = AccentPrimary
+        )
+        when {
+            loading -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = AccentPrimary
+                    )
+                    Text(
+                        text = "Loading diagnosis…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
+                    )
+                }
+            }
+            error != null -> {
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+            diagnosis.isNullOrBlank() -> {
+                Text(
+                    text = "No diagnosis yet for this run.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+            else -> {
+                Text(
+                    text = diagnosis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextPrimary
+                )
             }
         }
     }

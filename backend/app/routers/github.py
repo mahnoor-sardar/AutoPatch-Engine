@@ -9,8 +9,8 @@ from app.auth import require_api_key
 from app.config import settings
 from app.db import get_db
 from app.models import GitHubInstallation, Repository, SandboxRun
+from app.services.approval import create_pending_provision_gate
 from app.services.github_app import get_installation_token, verify_webhook_signature
-from app.workers.tasks import clone_and_index
 
 router = APIRouter()
 
@@ -170,13 +170,14 @@ async def github_webhook(
         db.commit()
         db.refresh(run)
 
-        task = clone_and_index.delay(run.id)
+        gate = create_pending_provision_gate(db, run)
 
         return {
             "ok": True,
             "event": event,
             "run_id": run.id,
-            "task_id": task.id,
+            "gate": gate.gate,
+            "gate_status": gate.status,
             "repo": repo_full_name,
             "ref": ref or repo.default_branch,
         }

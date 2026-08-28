@@ -106,6 +106,31 @@ class SandboxRun(Base):
         nullable=True,
     )
 
+    current_diff: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    patch_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
+    pr_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+
+    control_state: Mapped[str] = mapped_column(
+        String(32),
+        default="active",
+    )
+
+    pipeline_stage: Mapped[str] = mapped_column(
+        String(32),
+        default="provision",
+    )
+
     approval_gates: Mapped[list["ApprovalGate"]] = relationship(
         back_populates="run"
     )
@@ -117,6 +142,14 @@ class SandboxRun(Base):
     reproduction_attempts: Mapped[
         list["ReproductionAttempt"]
     ] = relationship(
+        back_populates="run"
+    )
+
+    patch_records: Mapped[list["PatchAttempt"]] = relationship(
+        back_populates="run"
+    )
+
+    audit_events: Mapped[list["AuditEvent"]] = relationship(
         back_populates="run"
     )
 
@@ -177,7 +210,8 @@ class Symbol(Base):
     )
 
     run_id: Mapped[int] = mapped_column(
-        ForeignKey("sandbox_runs.id")
+        ForeignKey("sandbox_runs.id"),
+        index=True,
     )
 
     path: Mapped[str] = mapped_column(
@@ -185,7 +219,13 @@ class Symbol(Base):
     )
 
     name: Mapped[str] = mapped_column(
-        String(255)
+        String(255),
+        index=True,
+    )
+
+    embedding: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
     )
 
     kind: Mapped[str] = mapped_column(
@@ -217,6 +257,11 @@ class Device(Base):
 
     fcm_token: Mapped[str] = mapped_column(
         Text
+    )
+
+    totp_secret: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
 
     label: Mapped[str] = mapped_column(
@@ -325,4 +370,111 @@ class ReproductionAttempt(Base):
 
     run: Mapped[SandboxRun] = relationship(
         back_populates="reproduction_attempts"
+    )
+
+
+class PatchAttempt(Base):
+    __tablename__ = "patch_attempts"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("sandbox_runs.id"),
+        index=True,
+    )
+
+    attempt_number: Mapped[int] = mapped_column(
+        Integer
+    )
+
+    diff: Mapped[str] = mapped_column(
+        Text
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="pending_review",
+    )
+
+    stdout: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    stderr: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    run: Mapped[SandboxRun] = relationship(
+        back_populates="patch_records"
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sandbox_runs.id"),
+        index=True,
+        nullable=True,
+    )
+
+    device_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        index=True,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(64)
+    )
+
+    detail: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    run: Mapped[SandboxRun | None] = relationship(
+        back_populates="audit_events"
+    )
+
+
+class ErrorIngest(Base):
+    __tablename__ = "error_ingests"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(32)
+    )
+
+    stack_trace: Mapped[str] = mapped_column(
+        Text
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
     )

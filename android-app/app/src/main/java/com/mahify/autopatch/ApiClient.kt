@@ -38,7 +38,10 @@ data class SandboxRun(
     val error: String?,
     val startedAt: String?,
     val finishedAt: String?,
-    val symbolCount: Int
+    val symbolCount: Int,
+    val currentDiff: String? = null,
+    val prUrl: String? = null,
+    val controlState: String? = null
 )
 
 
@@ -53,6 +56,13 @@ data class SandboxStats(
 data class SandboxRunsResponse(
     val stats: SandboxStats,
     val runs: List<SandboxRun>
+)
+
+
+data class RunDiagnosis(
+    val runId: Int,
+    val diagnosis: String?,
+    val createdAt: String?
 )
 
 
@@ -101,6 +111,12 @@ object ApiClient {
                 throw Exception(
                     "Device registration failed: HTTP ${response.code}"
                 )
+            }
+
+            val bodyText = response.body?.string().orEmpty()
+            val totpSecret = JSONObject(bodyText).optString("totp_secret")
+            if (totpSecret.isNotBlank()) {
+                DevicePrefs.save(context, deviceId, totpSecret)
             }
         }
     }
@@ -346,7 +362,16 @@ object ApiClient {
                                     run.optInt(
                                         "symbol_count",
                                         0
-                                    )
+                                    ),
+                                currentDiff =
+                                    run.optString("current_diff")
+                                        .takeIf { it.isNotBlank() },
+                                prUrl =
+                                    run.optString("pr_url")
+                                        .takeIf { it.isNotBlank() },
+                                controlState =
+                                    run.optString("control_state")
+                                        .takeIf { it.isNotBlank() }
                             )
                         )
                     }
@@ -360,13 +385,43 @@ object ApiClient {
         }
 
 
+    suspend fun getRunDiagnosis(runId: Int): RunDiagnosis =
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("$BASE_URL/v1/sandbox/runs/$runId/diagnosis")
+                .addHeader("X-API-Key", apiKey())
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw Exception(
+                        "Backend returned HTTP ${response.code}"
+                    )
+                }
+                val body = response.body?.string()
+                    ?: throw Exception("Empty backend response")
+                val root = JSONObject(body)
+                RunDiagnosis(
+                    runId = root.optInt("run_id"),
+                    diagnosis = root.optString("diagnosis")
+                        .takeIf { it.isNotBlank() && !root.isNull("diagnosis") },
+                    createdAt = root.optString("created_at")
+                        .takeIf { it.isNotBlank() && !root.isNull("created_at") }
+                )
+            }
+        }
+
+
     suspend fun approveSandbox(
         runId: Int,
-        deviceId: String
+        deviceId: String,
+        otpCode: String
     ) = withContext(Dispatchers.IO) {
 
         val json = JSONObject().apply {
             put("device_id", deviceId)
+            put("otp_code", otpCode)
         }
 
         val body = json.toString()
@@ -393,12 +448,45 @@ object ApiClient {
                     response.body?.string()
 
                 throw Exception(
-                    errorBody?.takeIf {
-                        it.isNotBlank()
-                    }
-                        ?: "Approval failed: HTTP ${response.code}"
+                    parseApprovalError(
+                        errorBody = errorBody,
+                        httpCode = response.code
+                    )
                 )
             }
+        }
+    }
+
+    private fun parseApprovalError(
+        errorBody: String?,
+        httpCode: Int
+    ): String {
+        if (errorBody.isNullOrBlank()) {
+            return "Approval failed: HTTP $httpCode"
+        }
+
+        return try {
+            val json = JSONObject(errorBody)
+            val detail = json.opt("detail")
+
+            when {
+                detail is String -> {
+                    when (detail.lowercase()) {
+                        "invalid otp" ->
+                            "Invalid OTP. Check the 6-digit code and try again."
+                        else -> detail
+                    }
+                }
+
+                detail is JSONArray &&
+                    errorBody.contains("otp_code") ->
+                    "A 6-digit OTP is required."
+
+                else ->
+                    "Approval failed: HTTP $httpCode"
+            }
+        } catch (_: Exception) {
+            errorBody
         }
     }
 
@@ -434,48 +522,78 @@ object ApiClient {
                         "Empty backend response"
                     )
 
-                val root = JSONObject(body)
+                ApprovalSubmit.parsePendingResponse(body)
+            }
+        }
 
-                val approvalsJson =
-                    root.optJSONArray("approvals")
-                        ?: JSONArray()
 
-                buildList {
+    suspend fun rejectSandbox(
+        runId: Int,
+        deviceId: String,
+        otpCode: String
+    ) = postJson(
+        "/v1/sandbox/runs/$runId/rejection",
+        JSONObject().apply {
+            put("device_id", deviceId)
+            put("otp_code", otpCode)
+        }
+    )
 
-                    for (
-                        i in 0 until approvalsJson.length()
-                    ) {
 
-                        val approval =
-                            approvalsJson.getJSONObject(i)
+    suspend fun controlRun(
+        runId: Int,
+        action: String,
+        deviceId: String,
+        otpCode: String
+    ) = postJson(
+        "/v1/sandbox/runs/$runId/$action",
+        JSONObject().apply {
+            put("device_id", deviceId)
+            put("otp_code", otpCode)
+        }
+    )
 
-                        add(
-                            com.mahify.autopatch.model.ApprovalRequest(
 
-                                runId =
-                                    approval.optInt(
-                                        "run_id"
-                                    ),
+    suspend fun approveWithToken(
+        runId: Int,
+        deviceId: String,
+        approvalToken: String,
+        tokenTs: Long
+    ) = postJson(
+        "/v1/sandbox/runs/$runId/approval",
+        JSONObject().apply {
+            put("device_id", deviceId)
+            put("approval_token", approvalToken)
+            put("token_ts", tokenTs)
+        }
+    )
 
-                                repository =
-                                    approval.optString(
-                                        "repository"
-                                    ),
 
-                                gate =
-                                    approval.optString(
-                                        "gate"
-                                    ),
+    suspend fun createSandboxRun(repo: String, ref: String) =
+        postJson(
+            "/v1/sandbox/runs",
+            JSONObject().apply {
+                put("repo", repo)
+                put("ref", ref)
+            }
+        )
 
-                                expiresAt =
-                                    approval.optString(
-                                        "expires_at"
-                                    ).takeIf {
-                                        it.isNotBlank()
-                                    }
-                            )
-                        )
-                    }
+
+    private suspend fun postJson(path: String, json: JSONObject) =
+        withContext(Dispatchers.IO) {
+            val body = json.toString()
+                .toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$BASE_URL$path")
+                .addHeader("X-API-Key", apiKey())
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string()
+                    throw Exception(
+                        parseApprovalError(errorBody, response.code)
+                    )
                 }
             }
         }

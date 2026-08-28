@@ -102,6 +102,31 @@ def test_unmatched_file_is_not_localized():
     assert results == []
 
 
+def test_unmatched_file_is_localized_via_source_search():
+    frames = [
+        StackFrame(
+            file="backend/app/missing.py",
+            line=10,
+            function="hidden_helper",
+        )
+    ]
+    symbols = [
+        {
+            "path": "backend/app/services/math.py",
+            "name": "calculate",
+            "kind": "function",
+            "start_line": 8,
+        }
+    ]
+    sources = {
+        "lib/hidden.py": "def hidden_helper():\n    return 1\n"
+    }
+    results = locate_frames(frames, symbols, sources=sources)
+    assert len(results) == 1
+    assert results[0].path == "lib/hidden.py"
+    assert results[0].confidence == "low"
+
+
 def test_multiple_frames_are_localized():
     frames = [
         StackFrame(

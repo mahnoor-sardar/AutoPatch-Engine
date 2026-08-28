@@ -51,7 +51,8 @@ data class ApprovalRequest(
     val runId: Int,
     val repository: String,
     val gate: String,
-    val expiresAt: String?
+    val expiresAt: String?,
+    val diff: String? = null
 )
 
 /** Mock data only — no networking, no persistence. Swap for real state upstream. */

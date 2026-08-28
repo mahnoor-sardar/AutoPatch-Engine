@@ -106,6 +106,39 @@ def index_source(path: str, source: str) -> list[tuple[str, str, int]]:
     return hits
 
 
+def function_parameters(path: str, source: str, name: str) -> list[str]:
+    ext = Path(path).suffix.lower()
+    parser = _PARSERS.get(ext)
+    if parser is None:
+        return []
+
+    tree = parser.parse(source.encode("utf-8"))
+    for node in _walk_nodes(tree.root_node):
+        if _node_name(node) != name:
+            continue
+        params = node.child_by_field_name("parameters")
+        if params is None:
+            params = node.child_by_field_name("formal_parameters")
+        if params is None:
+            continue
+        names: list[str] = []
+        for child in params.children:
+            if child.type in {"identifier", "required_parameter"}:
+                text = child.text.decode("utf-8") if child.text else ""
+                if text and text not in {"self", "cls", "(", ")", ",", "*"}:
+                    if text.startswith("*"):
+                        continue
+                    names.append(text.split(":")[0].strip())
+            if child.type == "typed_parameter" and child.child_by_field_name(
+                "name"
+            ):
+                names.append(
+                    child.child_by_field_name("name").text.decode("utf-8")
+                )
+        return [n for n in names if n and n not in {"self", "cls"}]
+    return []
+
+
 def index_files(
     files: dict[str, str],
 ) -> list[tuple[str, str, str, int]]:

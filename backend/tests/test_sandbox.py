@@ -25,6 +25,9 @@ def test_sandbox_run_accepts_stack_trace():
                 default_branch="main",
             )
 
+        def all(self):
+            return []
+
     class FakeDB:
         def query(self, model):
             return FakeQuery()

@@ -39,7 +39,8 @@ import kotlinx.coroutines.launch
 data class RepositoriesUiState(
     val repositories: List<GitHubRepository> = emptyList(),
     val isLoading: Boolean = true,
-    val error: String? = null
+    val error: String? = null,
+    val notice: String? = null
 )
 
 class RepositoriesViewModel : ViewModel() {
@@ -71,6 +72,21 @@ class RepositoriesViewModel : ViewModel() {
                     isLoading = false,
                     error = e.message
                         ?: "Unable to load repositories"
+                )
+            }
+        }
+    }
+
+    fun queueRun(repo: GitHubRepository) {
+        viewModelScope.launch {
+            try {
+                ApiClient.createSandboxRun(repo.fullName, repo.defaultBranch)
+                _uiState.value = _uiState.value.copy(
+                    notice = "Queued run for ${repo.fullName}"
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    error = e.message ?: "Unable to queue run"
                 )
             }
         }
@@ -146,8 +162,14 @@ fun RepositoriesScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(uiState.repositories) { repo ->
-                        RepoCard(repo)
+                    items(
+                        uiState.repositories.distinctBy { it.fullName },
+                        key = { it.fullName }
+                    ) { repo ->
+                        RepoCard(
+                            repo = repo,
+                            onQueue = { repositoriesViewModel.queueRun(repo) }
+                        )
                     }
 
                     item {
@@ -161,7 +183,8 @@ fun RepositoriesScreen(
 
 @Composable
 private fun RepoCard(
-    repo: GitHubRepository
+    repo: GitHubRepository,
+    onQueue: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -213,6 +236,10 @@ private fun RepoCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary
             )
+        }
+
+        Button(onClick = onQueue) {
+            Text("Queue")
         }
     }
 }
