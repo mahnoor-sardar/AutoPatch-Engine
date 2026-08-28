@@ -57,6 +57,7 @@ def test_diagnosis_returns_latest_text_only():
         log_audit(db, "diagnosis", run_id, None, "older diagnosis")
         log_audit(db, "approve", run_id, "test-device", "patch_review")
         log_audit(db, "diagnosis", run_id, None, "calculate divides by zero")
+        db.commit()
     finally:
         db.close()
 

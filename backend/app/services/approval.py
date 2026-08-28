@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 
 from app.models import ApprovalGate, Device, PushEvent, SandboxRun
 from app.services import fcm
-from app.services.audit import log_audit
+from app.services.audit import (
+    ACTOR_SYSTEM,
+    RESULT_EXPIRED,
+    log_audit,
+)
 
 SANDBOX_PROVISION_GATE = "sandbox_provision"
 PATCH_REVIEW_GATE = "patch_review"
@@ -118,7 +122,16 @@ def apply_gate_expiry(
     if run is not None and run.control_state != "killed":
         run.control_state = "paused"
         run.status = "paused"
-        log_audit(db, "expire", run.id, None, gate.gate)
+        log_audit(
+            db,
+            "expire",
+            run.id,
+            None,
+            gate.gate,
+            actor=ACTOR_SYSTEM,
+            result=RESULT_EXPIRED,
+            event_metadata={"gate": gate.gate},
+        )
         from app.services.events import notify_run_event
 
         notify_run_event(

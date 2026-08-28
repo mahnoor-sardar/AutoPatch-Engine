@@ -9,6 +9,7 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -443,8 +444,23 @@ class AuditEvent(Base):
         String(64)
     )
 
+    actor: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+
+    result: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+
     detail: Mapped[str | None] = mapped_column(
         Text,
+        nullable=True,
+    )
+
+    event_metadata: Mapped[dict | None] = mapped_column(
+        JSONB,
         nullable=True,
     )
 

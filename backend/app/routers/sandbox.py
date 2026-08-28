@@ -26,7 +26,13 @@ from app.services.approval import (
     expire_stale_gates,
     gate_is_expired,
 )
-from app.services.audit import log_audit, verify_device_authorization
+from app.services.audit import (
+    ACTOR_ANDROID,
+    RESULT_REJECTED,
+    RESULT_SUCCESS,
+    log_audit,
+    verify_device_authorization,
+)
 from app.services.events import publish_run_update
 from app.services.providers import get_sandbox_provider
 from app.workers.tasks import apply_patch_and_verify, clone_and_index, open_github_pr
@@ -222,8 +228,17 @@ def approve_sandbox(
     gate.status = "approved"
     gate.device_id = device.device_id
     gate.approved_at = datetime.now(timezone.utc)
+    log_audit(
+        db,
+        "approve",
+        run.id,
+        device.device_id,
+        gate.gate,
+        actor=ACTOR_ANDROID,
+        result=RESULT_SUCCESS,
+        event_metadata={"gate": gate.gate},
+    )
     db.commit()
-    log_audit(db, "approve", run.id, device.device_id, gate.gate)
 
     if gate.gate == SANDBOX_PROVISION_GATE:
         clone_and_index.delay(run.id)
@@ -268,8 +283,17 @@ def reject_sandbox(
     gate.status = "rejected"
     gate.device_id = device.device_id
     run.status = "rejected"
+    log_audit(
+        db,
+        "reject",
+        run.id,
+        device.device_id,
+        gate.gate,
+        actor=ACTOR_ANDROID,
+        result=RESULT_REJECTED,
+        event_metadata={"gate": gate.gate},
+    )
     db.commit()
-    log_audit(db, "reject", run.id, device.device_id, gate.gate)
     return {"ok": True, "run_id": run.id, "status": "rejected"}
 
 
@@ -309,8 +333,17 @@ def _control(
         run.status = "killed"
         _kill_sandbox(run)
 
+    log_audit(
+        db,
+        action,
+        run.id,
+        device.device_id,
+        action,
+        actor=ACTOR_ANDROID,
+        result=RESULT_SUCCESS,
+        event_metadata={"control": action},
+    )
     db.commit()
-    log_audit(db, action, run.id, device.device_id, action)
     publish_run_update(
         {
             "type": "control",
@@ -468,6 +501,9 @@ def list_audit(run_id: int, db: Session = Depends(get_db)):
                 "action": event.action,
                 "device_id": event.device_id,
                 "detail": event.detail,
+                "actor": event.actor,
+                "result": event.result,
+                "metadata": event.event_metadata,
                 "created_at": event.created_at.isoformat()
                 if event.created_at
                 else None,

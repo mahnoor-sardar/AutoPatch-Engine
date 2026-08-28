@@ -102,6 +102,7 @@ def test_log_audit_persists_expire_and_pr():
         run_id = repo_run.id if repo_run is not None else None
         log_audit(db, "expire", run_id, None, "sandbox_provision")
         log_audit(db, "pr_opened", run_id, None, "https://example/pr")
+        db.commit()
         events = (
             db.query(AuditEvent)
             .filter(AuditEvent.action.in_(["expire", "pr_opened"]))

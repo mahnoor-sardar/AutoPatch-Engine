@@ -22,7 +22,11 @@ from app.services.approval import (
     STAGE_PR,
     create_pending_gate,
 )
-from app.services.audit import log_audit
+from app.services.audit import (
+    ACTOR_WORKER,
+    RESULT_SUCCESS,
+    log_audit,
+)
 from app.services.diagnostic import locate_frames
 from app.services.embeddings import store_symbol_embeddings
 from app.services.events import notify_run_event
@@ -219,7 +223,10 @@ def clone_and_index(run_id: int) -> None:
                                     run.id,
                                     None,
                                     diagnosis,
+                                    actor=ACTOR_WORKER,
+                                    result=RESULT_SUCCESS,
                                 )
+                                db.commit()
                             except Exception:
                                 logger.exception("gemini diagnosis failed")
 
@@ -521,8 +528,17 @@ def open_github_pr(run_id: int) -> None:
         )
         run.pr_url = pr.get("html_url")
         _finish(run, started, "completed")
+        log_audit(
+            db,
+            "pr_opened",
+            run.id,
+            None,
+            run.pr_url,
+            actor=ACTOR_WORKER,
+            result=RESULT_SUCCESS,
+            event_metadata={"pr_url": run.pr_url} if run.pr_url else None,
+        )
         db.commit()
-        log_audit(db, "pr_opened", run.id, None, run.pr_url)
         notify_run_event(db, run, "Pull request opened", run.pr_url or "")
     except Exception as exc:
         db.rollback()
