@@ -4,6 +4,7 @@ from app.db import SessionLocal
 from app.models import (
     ApprovalGate,
     AuditEvent,
+    GitHubInstallation,
     PatchAttempt,
     ReproductionAttempt,
     Repository,
@@ -26,11 +27,38 @@ SOURCE_FILES = {
 }
 
 
+def _ensure_test_repository(db):
+    repo = db.query(Repository).order_by(Repository.id).first()
+    if repo is not None:
+        return repo
+    installation = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == 1)
+        .one_or_none()
+    )
+    if installation is None:
+        db.add(
+            GitHubInstallation(
+                installation_id=1,
+                account_login="owner",
+            )
+        )
+        db.flush()
+    repo = Repository(
+        full_name="owner/repo",
+        installation_id=1,
+        default_branch="main",
+    )
+    db.add(repo)
+    db.commit()
+    db.refresh(repo)
+    return repo
+
+
 def _seed_run(status="queued", **kwargs):
     db = SessionLocal()
     try:
-        repo = db.query(Repository).order_by(Repository.id).first()
-        assert repo is not None
+        repo = _ensure_test_repository(db)
         run = SandboxRun(
             status=status,
             repo=repo.full_name,
