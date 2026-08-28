@@ -1,10 +1,13 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 
 import firebase_admin
 from firebase_admin import credentials, messaging
 
 from app.config import ROOT
+
+_push_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fcm")
 
 
 def _ensure_app() -> None:
@@ -35,3 +38,17 @@ def send_push(
         token=token,
     )
     return messaging.send(message)
+
+
+def send_push_with_timeout(
+    token: str,
+    title: str,
+    body: str,
+    data: dict[str, str] | None = None,
+    timeout_seconds: float = 3.0,
+) -> str:
+    future = _push_pool.submit(send_push, token, title, body, data)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeout as exc:
+        raise TimeoutError("FCM send timed out") from exc

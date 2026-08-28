@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from tree_sitter import Language, Parser
 
@@ -106,7 +108,106 @@ def index_source(path: str, source: str) -> list[tuple[str, str, int]]:
     return hits
 
 
-def function_parameters(path: str, source: str, name: str) -> list[str]:
+@dataclass(frozen=True)
+class ParameterInfo:
+    name: str
+    annotation: str | None = None
+    default_source: str | None = None
+    default_is_simple_literal: bool = False
+
+
+_SAFE_DEFAULT_SOURCE = re.compile(
+    r"""^(?:
+        None|True|False|
+        -?\d+(?:\.\d+)?|
+        (?:[rRuUfFbB]*)(['\"])(?:\\.|(?!\1).)*\1
+    )$""",
+    re.VERBOSE,
+)
+
+_SKIP_PARAM_TYPES = {
+    "(",
+    ")",
+    ",",
+    "comment",
+    "list_splat_pattern",
+    "dictionary_splat_pattern",
+    "keyword_separator",
+    "positional_separator",
+    "tuple_pattern",
+}
+
+
+def _decode_node(node) -> str:
+    if node is None or node.text is None:
+        return ""
+    return node.text.decode("utf-8")
+
+
+def _is_safe_default_source(text: str) -> bool:
+    return bool(_SAFE_DEFAULT_SOURCE.fullmatch(text.strip()))
+
+
+def _first_child_of_type(node, type_name: str):
+    for child in node.children:
+        if child.type == type_name:
+            return child
+    return None
+
+
+def _python_parameter_info(child) -> ParameterInfo | None:
+    if child.type in _SKIP_PARAM_TYPES:
+        return None
+    if child.type not in {
+        "identifier",
+        "typed_parameter",
+        "default_parameter",
+        "typed_default_parameter",
+    }:
+        return None
+
+    name_node = child if child.type == "identifier" else child.child_by_field_name("name")
+    if name_node is None:
+        name_node = _first_child_of_type(child, "identifier")
+    if name_node is not None and name_node.type in {
+        "list_splat_pattern",
+        "dictionary_splat_pattern",
+    }:
+        return None
+
+    name = _decode_node(name_node)
+    if not name or name in {"self", "cls"} or name.startswith("*"):
+        return None
+
+    type_node = child.child_by_field_name("type")
+    if type_node is None:
+        type_node = _first_child_of_type(child, "type")
+    annotation = _decode_node(type_node).strip() or None
+
+    value_node = child.child_by_field_name("value")
+    if value_node is None and child.type in {
+        "default_parameter",
+        "typed_default_parameter",
+    }:
+        for grandchild in reversed(child.children):
+            if grandchild.type not in {"=", ":", "type", "identifier"}:
+                value_node = grandchild
+                break
+    default_source = _decode_node(value_node).strip() or None
+    default_is_simple = bool(
+        default_source and _is_safe_default_source(default_source)
+    )
+    return ParameterInfo(
+        name=name,
+        annotation=annotation,
+        default_source=default_source,
+        default_is_simple_literal=default_is_simple,
+    )
+
+
+def inspect_function_parameters(
+    path: str, source: str, name: str
+) -> list[ParameterInfo]:
     ext = Path(path).suffix.lower()
     parser = _PARSERS.get(ext)
     if parser is None:
@@ -121,22 +222,34 @@ def function_parameters(path: str, source: str, name: str) -> list[str]:
             params = node.child_by_field_name("formal_parameters")
         if params is None:
             continue
-        names: list[str] = []
+        infos: list[ParameterInfo] = []
         for child in params.children:
-            if child.type in {"identifier", "required_parameter"}:
-                text = child.text.decode("utf-8") if child.text else ""
-                if text and text not in {"self", "cls", "(", ")", ",", "*"}:
-                    if text.startswith("*"):
-                        continue
-                    names.append(text.split(":")[0].strip())
-            if child.type == "typed_parameter" and child.child_by_field_name(
-                "name"
-            ):
-                names.append(
-                    child.child_by_field_name("name").text.decode("utf-8")
-                )
-        return [n for n in names if n and n not in {"self", "cls"}]
+            if ext == ".py":
+                info = _python_parameter_info(child)
+            else:
+                info = _js_parameter_info(child)
+            if info is not None:
+                infos.append(info)
+        return infos
     return []
+
+
+def _js_parameter_info(child) -> ParameterInfo | None:
+    if child.type in {"identifier", "required_parameter"}:
+        text = _decode_node(child)
+        if text and text not in {"self", "cls", "(", ")", ",", "*"}:
+            if text.startswith("*"):
+                return None
+            return ParameterInfo(name=text.split(":")[0].strip())
+    if child.type == "typed_parameter" and child.child_by_field_name("name"):
+        name = _decode_node(child.child_by_field_name("name"))
+        if name and name not in {"self", "cls"}:
+            return ParameterInfo(name=name)
+    return None
+
+
+def function_parameters(path: str, source: str, name: str) -> list[str]:
+    return [item.name for item in inspect_function_parameters(path, source, name)]
 
 
 def index_files(

@@ -10,6 +10,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.mahify.autopatch.HomeViewModel
 import com.mahify.autopatch.model.HealthState
 import com.mahify.autopatch.ui.components.AppBottomNav
 import com.mahify.autopatch.ui.components.AppDestination
@@ -20,7 +22,7 @@ import com.mahify.autopatch.ui.screens.RepositoriesScreen
 import com.mahify.autopatch.ui.screens.SettingsScreen
 
 @Composable
-fun AutoPatchApp() {
+fun AutoPatchApp(homeViewModel: HomeViewModel = viewModel()) {
 
     var currentDestination by remember {
         mutableStateOf(AppDestination.HOME)
@@ -69,7 +71,8 @@ fun AutoPatchApp() {
                     onOpenNotifications = {
                         // TODO: Open notifications
                     },
-                    modifier = Modifier.padding(innerPadding)
+                    modifier = Modifier.padding(innerPadding),
+                    homeViewModel = homeViewModel
                 )
             }
 
@@ -87,7 +90,8 @@ fun AutoPatchApp() {
 
             AppDestination.SETTINGS -> {
                 SettingsScreen(
-                    modifier = Modifier.padding(innerPadding)
+                    modifier = Modifier.padding(innerPadding),
+                    homeViewModel = homeViewModel
                 )
             }
         }

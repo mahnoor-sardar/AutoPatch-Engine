@@ -17,7 +17,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mahify.autopatch.HomeViewModel
@@ -32,16 +31,14 @@ import com.mahify.autopatch.ui.theme.TextPrimary
 import com.mahify.autopatch.ui.theme.TextSecondary
 
 @Composable
-fun SettingsScreen(modifier: Modifier = Modifier) {
-    val homeViewModel: HomeViewModel = viewModel()
+fun SettingsScreen(
+    modifier: Modifier = Modifier,
+    homeViewModel: HomeViewModel = viewModel()
+) {
     val uiState by homeViewModel.uiState.collectAsState()
     var pushNotifications by remember { mutableStateOf(true) }
     var failureAlertsOnly by remember { mutableStateOf(false) }
     var darkModeLocked by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        homeViewModel.refresh()
-    }
 
     Column(
         modifier = modifier

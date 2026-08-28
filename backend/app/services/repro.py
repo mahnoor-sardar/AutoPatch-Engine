@@ -2,7 +2,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.services.diagnostic import DiagnosticLocation
-from app.services.indexer import function_parameters
+from app.services.indexer import ParameterInfo, function_parameters, inspect_function_parameters
+
+
+_PRIMITIVE_ARGS = {
+    "int": "0",
+    "float": "0.0",
+    "str": '""',
+    "bool": "False",
+}
 
 
 @dataclass(frozen=True)
@@ -11,10 +19,42 @@ class ReproductionTest:
     test_source: str
 
 
-def _dummy_python_args(params: list[str]) -> str:
+def _normalize_annotation(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    text = raw.strip()
+    if len(text) >= 2 and text[0] in {'"', "'"} and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    return text or None
+
+
+def _python_arg_for_param(param: ParameterInfo) -> str | None:
+    if param.default_is_simple_literal and param.default_source:
+        return param.default_source
+    annotation = _normalize_annotation(param.annotation)
+    if annotation in _PRIMITIVE_ARGS:
+        return _PRIMITIVE_ARGS[annotation]
+    return None
+
+
+def _python_call_args(params: list[ParameterInfo]) -> str:
     if not params:
         return ""
-    return ", ".join("None" for _ in params)
+    args: list[str] = []
+    missing: list[str] = []
+    for param in params:
+        value = _python_arg_for_param(param)
+        if value is None:
+            missing.append(param.name)
+        else:
+            args.append(value)
+    if missing:
+        names = ", ".join(missing)
+        raise ValueError(
+            "reproduction synthesis incomplete: "
+            f"unsupported required parameter(s): {names}"
+        )
+    return ", ".join(args)
 
 
 def synthesize_python_repro(
@@ -33,8 +73,8 @@ def synthesize_python_repro(
         raise ValueError("Diagnostic location must contain a symbol name")
 
     expected_exception = exception_type or "Exception"
-    params = function_parameters(location.path, source, location.name)
-    call_args = _dummy_python_args(params)
+    params = inspect_function_parameters(location.path, source, location.name)
+    call_args = _python_call_args(params)
 
     module_path = (
         Path(location.path).with_suffix("").as_posix().replace("/", ".")
@@ -57,6 +97,8 @@ def test_reproduces_{location.name}_failure():
         {location.name}({call_args})
     except expected_exception:
         raise
+    except Exception:
+        return
 '''
 
     return ReproductionTest(

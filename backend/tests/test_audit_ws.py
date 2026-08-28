@@ -83,9 +83,12 @@ def test_publish_run_update_uses_redis_pubsub(monkeypatch):
         def publish(self, channel, body):
             seen.append((channel, body))
 
+        def close(self):
+            return None
+
     class FakeFactory:
         @staticmethod
-        def from_url(url):
+        def from_url(url, **kwargs):
             return FakeRedis()
 
     monkeypatch.setattr("app.services.events.Redis", FakeFactory)

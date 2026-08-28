@@ -1,9 +1,7 @@
 package com.mahify.autopatch.ui.screens
 
-import android.content.Context
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -44,7 +42,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import androidx.lifecycle.viewmodel.compose.viewModel
 
 import com.mahify.autopatch.ApprovalSubmit
@@ -82,7 +83,10 @@ fun HomeScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
 
     LaunchedEffect(Unit) {
-        homeViewModel.loadPendingApproval(context)
+        while (isActive) {
+            delay(8_000)
+            homeViewModel.pollForUpdates()
+        }
     }
 
     val engineHealth = when {
@@ -103,6 +107,15 @@ fun HomeScreen(
         else -> "Unable to connect to the backend."
     }
 
+    val pendingApprovals = ApprovalSubmit.newestRunFirst(uiState.pendingApprovals)
+    LaunchedEffect(pendingApprovals.size, uiState.approvalError) {
+        android.util.Log.i(
+            "AutoPatchApproval",
+            "HomeScreen render pending=${pendingApprovals.size} " +
+                "error=${uiState.approvalError} runIds=${pendingApprovals.map { it.runId }}"
+        )
+    }
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(
@@ -120,52 +133,59 @@ fun HomeScreen(
             )
         }
 
-        /*
-         * Android approval gate.
-         *
-         * This becomes visible only when the backend reports
-         * a pending sandbox approval for this device.
-         */
-        items(
-            ApprovalSubmit.newestRunFirst(uiState.pendingApprovals),
-            key = { ApprovalSubmit.itemKey(it) }
-        ) { approval ->
-            ApprovalCard(
-                approval = approval,
-                loading = uiState.approvalLoading,
-                error = uiState.approvalError,
-                onApprove = { otpCode ->
-                    homeViewModel.approvePendingApproval(
-                        context,
-                        approval,
-                        otpCode
-                    )
-                },
-                onReject = { otpCode ->
-                    homeViewModel.rejectPendingApproval(
-                        context,
-                        approval,
-                        otpCode
-                    )
-                },
-                onBiometric = {
-                    requestBiometricApproval(
-                        context,
-                        onSuccess = {
-                            homeViewModel.approveWithSignedToken(
-                                context,
-                                approval
-                            )
-                        },
-                        onError = { message ->
-                            homeViewModel.setApprovalError(message)
-                        }
-                    )
-                },
-                onRefresh = {
-                    homeViewModel.loadPendingApproval(context)
-                }
-            )
+        if (pendingApprovals.isNotEmpty()) {
+            item {
+                SectionHeader(title = "Approval required")
+            }
+            items(
+                pendingApprovals,
+                key = { ApprovalSubmit.itemKey(it) }
+            ) { approval ->
+                ApprovalCard(
+                    approval = approval,
+                    loading = uiState.approvalLoading,
+                    error = uiState.approvalError,
+                    onApprove = { otpCode ->
+                        homeViewModel.approvePendingApproval(
+                            context,
+                            approval,
+                            otpCode
+                        )
+                    },
+                    onReject = { otpCode ->
+                        homeViewModel.rejectPendingApproval(
+                            context,
+                            approval,
+                            otpCode
+                        )
+                    },
+                    onBiometric = {
+                        requestBiometricApproval(
+                            context,
+                            onSuccess = {
+                                homeViewModel.approveWithSignedToken(
+                                    context,
+                                    approval
+                                )
+                            },
+                            onError = { message ->
+                                homeViewModel.setApprovalError(message)
+                            }
+                        )
+                    },
+                    onRefresh = {
+                        homeViewModel.refresh()
+                    }
+                )
+            }
+        } else if (!uiState.approvalError.isNullOrBlank()) {
+            item {
+                Text(
+                    text = uiState.approvalError ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = StatusError
+                )
+            }
         }
 
         item {
@@ -197,7 +217,6 @@ fun HomeScreen(
                         icon = Icons.Outlined.Refresh,
                         onClick = {
                             homeViewModel.refresh()
-                            homeViewModel.loadPendingApproval(context)
                         },
                         modifier = Modifier.weight(1f)
                     )
@@ -370,7 +389,9 @@ private fun ApprovalCard(
         Text(
             text = approval.repository,
             style = MaterialTheme.typography.titleSmall,
-            color = TextPrimary
+            color = TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
         )
 
         Text(
@@ -379,9 +400,9 @@ private fun ApprovalCard(
             color = TextSecondary
         )
 
-        approval.expiresAt?.let {
+        approval.expiresAt?.let { expiresAt ->
             Text(
-                text = "Approval expires soon",
+                text = formatApprovalExpiry(expiresAt),
                 style = MaterialTheme.typography.labelSmall,
                 color = StatusWarning
             )
@@ -473,7 +494,14 @@ private fun ApprovalCard(
             enabled = !loading,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Approve $runLabel with biometrics")
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.height(18.dp),
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Text("Approve $runLabel with biometrics")
+            }
         }
     }
 }
@@ -623,7 +651,7 @@ private fun formatTimeAgo(
         ?: return "Unknown time"
 
     return try {
-        val instant = java.time.Instant.parse(timestamp)
+        val instant = parseInstant(timestamp)
         val now = java.time.Instant.now()
 
         val seconds = java.time.Duration.between(
@@ -644,6 +672,9 @@ private fun formatTimeAgo(
                 "$hours hr ago"
             }
 
+            seconds < 172800 ->
+                "Yesterday"
+
             else -> {
                 val days = seconds / 86400
                 "$days days ago"
@@ -651,6 +682,31 @@ private fun formatTimeAgo(
         }
     } catch (_: Exception) {
         "Unknown time"
+    }
+}
+
+private fun formatApprovalExpiry(expiresAt: String): String {
+    return try {
+        val instant = parseInstant(expiresAt)
+        val remaining = java.time.Duration.between(
+            java.time.Instant.now(),
+            instant
+        ).seconds
+        when {
+            remaining <= 0 -> "Expired — tap Refresh for a new gate"
+            remaining < 60 -> "Expires in ${remaining}s"
+            else -> "Expires in ${remaining / 60} min"
+        }
+    } catch (_: Exception) {
+        "Approval expires soon"
+    }
+}
+
+private fun parseInstant(timestamp: String): java.time.Instant {
+    return try {
+        java.time.Instant.parse(timestamp)
+    } catch (_: Exception) {
+        java.time.OffsetDateTime.parse(timestamp).toInstant()
     }
 }
 

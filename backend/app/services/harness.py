@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 
 from app.services.e2b_runner import COMMAND_TIMEOUT, install_project_dependencies
 
@@ -12,6 +13,11 @@ _SYNTHESIS_MARKERS = (
 )
 
 
+_EXPECTED_EXCEPTION_ASSIGN = re.compile(
+    r"expected_exception\s*=\s*([A-Za-z_][\w.]*)"
+)
+
+
 @dataclass(frozen=True)
 class ReproductionResult:
     exit_code: int
@@ -19,12 +25,38 @@ class ReproductionResult:
     stderr: str
     setup_failed: bool = False
     synthesis_failed: bool = False
+    expected_exception: str | None = None
 
     @property
     def reproduced(self) -> bool:
         if self.setup_failed or self.synthesis_failed:
             return False
-        return self.exit_code != 0
+        if self.exit_code == 0:
+            return False
+        if not _stderr_matches_expected(
+            self.stdout, self.stderr, self.expected_exception
+        ):
+            return False
+        return True
+
+
+def _expected_exception_from_source(test_source: str) -> str | None:
+    match = _EXPECTED_EXCEPTION_ASSIGN.search(test_source)
+    if match is None:
+        return None
+    name = match.group(1).split(".")[-1]
+    if name in {"Exception", "BaseException"}:
+        return None
+    return name
+
+
+def _stderr_matches_expected(
+    stdout: str, stderr: str, expected_exception: str | None
+) -> bool:
+    if not expected_exception:
+        return True
+    combined = f"{stdout}\n{stderr}"
+    return expected_exception in combined
 
 
 def _is_synthesis_failure(stderr: str) -> bool:
@@ -81,6 +113,7 @@ def run_reproduction_test(
             exit_code=0,
             stdout=(install_out + (result.stdout or "")),
             stderr=result.stderr or "",
+            expected_exception=_expected_exception_from_source(test_source),
         )
     except Exception as exc:
         exit_code = int(getattr(exc, "exit_code", 1) or 1)
@@ -92,6 +125,7 @@ def run_reproduction_test(
             stdout=install_out + stdout,
             stderr=stderr,
             synthesis_failed=synthesis_failed,
+            expected_exception=_expected_exception_from_source(test_source),
         )
 
 

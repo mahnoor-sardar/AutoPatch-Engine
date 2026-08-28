@@ -16,10 +16,18 @@ RUN_CHANNEL = "autopatch:runs"
 
 def publish_run_update(payload: dict | None = None) -> None:
     body = json.dumps(payload or {"type": "refresh"})
+    client = None
     try:
-        Redis.from_url(settings.redis_url).publish(RUN_CHANNEL, body)
+        client = Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+        client.publish(RUN_CHANNEL, body)
     except Exception:
         logger.exception("failed to publish run update")
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 async def subscribe_run_updates():
@@ -58,7 +66,7 @@ def notify_run_event(
     for device in db.query(Device).all():
         status = "sent"
         try:
-            fcm.send_push(device.fcm_token, title, body, data)
+            fcm.send_push_with_timeout(device.fcm_token, title, body, data)
         except Exception:
             status = "failed"
         db.add(

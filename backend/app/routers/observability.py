@@ -50,10 +50,19 @@ def _string_field(payload: object, *keys: str) -> str | None:
 
 
 def _sentry_values(payload: dict) -> list:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else None
+    data_error = (
+        data.get("error") if data and isinstance(data.get("error"), dict) else None
+    )
+    data_event = (
+        data.get("event") if data and isinstance(data.get("event"), dict) else None
+    )
     for candidate in (
         payload,
         payload.get("event") if isinstance(payload.get("event"), dict) else None,
-        payload.get("data") if isinstance(payload.get("data"), dict) else None,
+        data,
+        data_error,
+        data_event,
     ):
         if not isinstance(candidate, dict):
             continue
@@ -164,20 +173,69 @@ def extract_stack_trace(payload: dict) -> str | None:
     return None
 
 
-def _payload_repo(payload: dict) -> str | None:
-    repo = payload.get("repo") or payload.get("repository")
-    if isinstance(repo, dict):
-        repo = repo.get("full_name") or repo.get("name")
-    tags = payload.get("tags")
-    if not repo and isinstance(tags, dict):
-        repo = tags.get("repo") or tags.get("repository")
+def _repo_from_tag_dict(tags: object) -> str | None:
+    if not isinstance(tags, dict):
+        return None
+    repo = tags.get("repo") or tags.get("repository")
     if isinstance(repo, str) and "/" in repo:
         return repo
     return None
 
 
-def _maybe_start_run(db: Session, payload: dict, stack_trace: str) -> None:
-    repo_name = _payload_repo(payload)
+def _repo_from_tag_list(tags: object) -> str | None:
+    if not isinstance(tags, list):
+        return None
+    for item in tags:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        key, value = item[0], item[1]
+        if key == "repo" and isinstance(value, str) and "/" in value:
+            return value
+    return None
+
+
+def _sentry_tag_containers(payload: dict) -> list:
+    containers: list = [payload.get("tags")]
+    event = payload.get("event")
+    if isinstance(event, dict):
+        containers.append(event.get("tags"))
+    data = payload.get("data")
+    if isinstance(data, dict):
+        containers.append(data.get("tags"))
+        error = data.get("error")
+        if isinstance(error, dict):
+            containers.append(error.get("tags"))
+        nested_event = data.get("event")
+        if isinstance(nested_event, dict):
+            containers.append(nested_event.get("tags"))
+    return containers
+
+
+def _payload_repo(payload: dict, *, provider: str | None = None) -> str | None:
+    repo = payload.get("repo") or payload.get("repository")
+    if isinstance(repo, dict):
+        repo = repo.get("full_name") or repo.get("name")
+    if isinstance(repo, str) and "/" in repo:
+        return repo
+
+    found = _repo_from_tag_dict(payload.get("tags"))
+    if found:
+        return found
+
+    if provider != "sentry":
+        return None
+
+    for tags in _sentry_tag_containers(payload):
+        found = _repo_from_tag_dict(tags) or _repo_from_tag_list(tags)
+        if found:
+            return found
+    return None
+
+
+def _maybe_start_run(
+    db: Session, payload: dict, stack_trace: str, provider: str
+) -> None:
+    repo_name = _payload_repo(payload, provider=provider)
     if not repo_name:
         return
     repo = (
@@ -245,7 +303,7 @@ def _ingest(
     db.commit()
     db.refresh(row)
 
-    _maybe_start_run(db, payload, stack_trace)
+    _maybe_start_run(db, payload, stack_trace, provider)
 
     return ErrorIngestResponse(
         provider=provider,

@@ -1,15 +1,18 @@
 package com.mahify.autopatch
 
+import android.app.Application
 import android.content.Context
-import android.os.Build
 import android.provider.Settings
-import androidx.lifecycle.ViewModel
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class HomeUiState(
     val backendOnline: Boolean = false,
@@ -32,12 +35,16 @@ data class HomeUiState(
     val error: String? = null
 )
 
-class HomeViewModel : ViewModel() {
+class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(HomeUiState())
 
     val uiState: StateFlow<HomeUiState> =
         _uiState.asStateFlow()
+
+    private val refreshMutex = Mutex()
+    private var lastHealthAtMs = 0L
+    private var refreshInFlight = false
 
     init {
         refresh()
@@ -46,49 +53,82 @@ class HomeViewModel : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch {
-
-            _uiState.value = _uiState.value.copy(
-                isLoading = true,
-                error = null
+            refreshInternal(
+                showLoading = _uiState.value.recentRuns.isEmpty(),
+                includeHealth = true
             )
+        }
+    }
+
+    fun pollForUpdates() {
+        viewModelScope.launch {
+            refreshInternal(showLoading = false, includeHealth = false)
+        }
+    }
+
+    private suspend fun refreshInternal(
+        showLoading: Boolean,
+        includeHealth: Boolean
+    ) {
+        if (refreshInFlight || !refreshMutex.tryLock()) {
+            Log.i(LOG_TAG, "skip refresh stacking inFlight=$refreshInFlight")
+            return
+        }
+        refreshInFlight = true
+        try {
+            if (showLoading) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = true,
+                    error = null
+                )
+            }
+
+            loadPendingApprovalInternal(getApplication())
 
             try {
-                val health = ApiClient.getHealth()
+                val now = System.currentTimeMillis()
+                val shouldCheckHealth =
+                    includeHealth || now - lastHealthAtMs > 60_000L
+
+                val health = if (shouldCheckHealth) {
+                    lastHealthAtMs = now
+                    ApiClient.getHealth()
+                } else {
+                    null
+                }
                 val sandbox = ApiClient.getSandboxRuns()
 
                 _uiState.value = _uiState.value.copy(
-                    backendOnline = health.ok,
-                    postgresOnline = health.postgres,
-                    redisOnline = health.redis,
-
+                    backendOnline = health?.ok ?: _uiState.value.backendOnline,
+                    postgresOnline = health?.postgres ?: _uiState.value.postgresOnline,
+                    redisOnline = health?.redis ?: _uiState.value.redisOnline,
                     totalRuns = sandbox.stats.total,
                     successfulRuns = sandbox.stats.successful,
                     runningRuns = sandbox.stats.running,
                     failedRuns = sandbox.stats.failed,
-
                     recentRuns = sandbox.runs,
-
                     isLoading = false,
                     error = null
                 )
 
-                checkFirebase()
-
+                if (shouldCheckHealth) {
+                    checkFirebase()
+                }
             } catch (e: Exception) {
-
                 _uiState.value = _uiState.value.copy(
-                    backendOnline = false,
-                    postgresOnline = false,
-                    redisOnline = false,
+                    backendOnline = if (includeHealth) false else _uiState.value.backendOnline,
+                    postgresOnline = if (includeHealth) false else _uiState.value.postgresOnline,
+                    redisOnline = if (includeHealth) false else _uiState.value.redisOnline,
                     isLoading = false,
-                    error = e.message
-                        ?: "Unable to connect to backend"
+                    error = e.message ?: "Unable to connect to backend"
                 )
-
-                checkFirebase()
+                if (includeHealth) {
+                    checkFirebase()
+                }
             }
-
-            // Approval loading is triggered by HomeScreen
+        } finally {
+            refreshInFlight = false
+            refreshMutex.unlock()
         }
     }
 
@@ -113,30 +153,39 @@ class HomeViewModel : ViewModel() {
 
     fun loadPendingApproval(context: Context) {
         viewModelScope.launch {
-
-            try {
-                val deviceId = getDeviceId(context)
-
-                if (deviceId.isBlank()) {
-                    return@launch
-                }
-
-                val approvals = ApprovalSubmit.newestRunFirst(
-                    ApiClient.getPendingApprovals(deviceId)
-                )
-
-                _uiState.value = _uiState.value.copy(
-                    pendingApprovals = approvals,
-                    approvalError = null
-                )
-
-            } catch (e: Exception) {
-
-                _uiState.value = _uiState.value.copy(
-                    approvalError =
-                        e.message ?: "Unable to load approval"
-                )
+            refreshMutex.withLock {
+                loadPendingApprovalInternal(context)
             }
+        }
+    }
+
+    private suspend fun loadPendingApprovalInternal(context: Context) {
+        try {
+            val deviceId = getDeviceId(context)
+            Log.i(LOG_TAG, "loadPending deviceId=$deviceId")
+            if (deviceId.isBlank()) {
+                _uiState.value = _uiState.value.copy(
+                    approvalError = "Unable to determine Android device ID"
+                )
+                return
+            }
+            val approvals = ApprovalSubmit.newestRunFirst(
+                ApiClient.getPendingApprovals(deviceId)
+            )
+            Log.i(
+                LOG_TAG,
+                "HomeUiState pendingApprovals=${approvals.size} runIds=${approvals.map { it.runId }}"
+            )
+            _uiState.value = _uiState.value.copy(
+                pendingApprovals = approvals,
+                approvalError = null
+            )
+        } catch (e: Exception) {
+            val message = e.message ?: "Unable to load pending approvals"
+            Log.e(LOG_TAG, "HomeUiState approvalError=$message", e)
+            _uiState.value = _uiState.value.copy(
+                approvalError = message
+            )
         }
     }
 
@@ -175,7 +224,6 @@ class HomeViewModel : ViewModel() {
                     approvalLoading = false
                 )
                 refresh()
-                loadPendingApproval(context)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     approvalLoading = false,
@@ -234,7 +282,6 @@ class HomeViewModel : ViewModel() {
                     approvalLoading = false
                 )
                 refresh()
-                loadPendingApproval(context)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     approvalLoading = false,
@@ -254,7 +301,6 @@ class HomeViewModel : ViewModel() {
                     otpCode.trim()
                 )
                 refresh()
-                loadPendingApproval(context)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     error = e.message ?: "Control failed"
@@ -303,7 +349,6 @@ class HomeViewModel : ViewModel() {
                 )
 
                 refresh()
-                loadPendingApproval(context)
 
             } catch (e: Exception) {
 
@@ -322,5 +367,9 @@ class HomeViewModel : ViewModel() {
 
     fun setApprovalError(message: String) {
         _uiState.value = _uiState.value.copy(approvalError = message)
+    }
+
+    companion object {
+        private const val LOG_TAG = "AutoPatchApproval"
     }
 }

@@ -5,9 +5,15 @@ import json
 from fastapi.testclient import TestClient
 
 from app.config import settings
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.main import app
-from app.models import ErrorIngest
+from app.models import (
+    ApprovalGate,
+    ErrorIngest,
+    GitHubInstallation,
+    Repository,
+    SandboxRun,
+)
 
 client = TestClient(app)
 
@@ -48,6 +54,36 @@ DATADOG_PAYLOAD = {
     "error": {
         "stack": PYTHON_TRACE,
     }
+}
+
+LIVE_SENTRY_ERROR_PAYLOAD = {
+    "action": "created",
+    "data": {
+        "error": {
+            "exception": {
+                "values": [
+                    {
+                        "type": "ZeroDivisionError",
+                        "value": "division by zero",
+                        "stacktrace": {
+                            "frames": [
+                                {
+                                    "filename": "test_app.py",
+                                    "function": "trigger_error",
+                                    "lineno": 10,
+                                    "context_line": "division_by_zero = 1 / 0",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            "tags": [
+                ["environment", "autopatch-test"],
+                ["repo", "owner/repo"],
+            ],
+        }
+    },
 }
 
 
@@ -108,6 +144,13 @@ def test_datadog_rejects_invalid_signature(monkeypatch):
         content=body,
         headers={"X-Datadog-Signature": "sha256=deadbeef"},
     )
+    assert response.status_code == 401
+
+
+def test_datadog_rejects_missing_signature(monkeypatch):
+    _override_secrets(monkeypatch)
+    body = json.dumps(DATADOG_PAYLOAD).encode()
+    response = client.post("/v1/webhooks/datadog", content=body)
     assert response.status_code == 401
 
 
@@ -200,3 +243,191 @@ def test_valid_signature_rejects_payload_without_stack_trace(monkeypatch):
         headers={"X-Datadog-Signature": _sign(body, DATADOG_SECRET)},
     )
     assert response.status_code == 400
+
+
+def _ensure_owner_repo(db):
+    repo = (
+        db.query(Repository)
+        .filter(Repository.full_name == "owner/repo")
+        .one_or_none()
+    )
+    if repo is not None:
+        return repo
+    installation = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == 1)
+        .one_or_none()
+    )
+    if installation is None:
+        db.add(
+            GitHubInstallation(
+                installation_id=1,
+                account_login="owner",
+            )
+        )
+        db.flush()
+    repo = Repository(
+        full_name="owner/repo",
+        installation_id=1,
+        default_branch="main",
+    )
+    db.add(repo)
+    db.commit()
+    db.refresh(repo)
+    return repo
+
+
+def _payload_with_repo(base: dict) -> dict:
+    payload = dict(base)
+    payload["repo"] = "owner/repo"
+    return payload
+
+
+def _stub_run_side_effects(monkeypatch) -> list:
+    delayed: list[int] = []
+    monkeypatch.setattr(
+        "app.workers.tasks.clone_and_index.delay",
+        lambda run_id: delayed.append(run_id),
+    )
+    monkeypatch.setattr(
+        "app.services.fcm.send_push",
+        lambda *args, **kwargs: "ok",
+    )
+    return delayed
+
+
+def _seed_registered_repo() -> tuple[int, int]:
+    db = SessionLocal()
+    try:
+        _ensure_owner_repo(db)
+        last_run_id = db.query(SandboxRun.id).order_by(SandboxRun.id.desc()).first()
+        last_ingest_id = (
+            db.query(ErrorIngest.id).order_by(ErrorIngest.id.desc()).first()
+        )
+        return (
+            last_run_id[0] if last_run_id else 0,
+            last_ingest_id[0] if last_ingest_id else 0,
+        )
+    finally:
+        db.close()
+
+
+def _assert_ingest_created_pending_run(
+    *,
+    response,
+    delayed: list[int],
+    last_run_id: int,
+    last_ingest_id: int,
+    provider: str,
+) -> None:
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["provider"] == provider
+    assert payload["id"] > last_ingest_id
+    assert delayed == []
+
+    db = SessionLocal()
+    try:
+        ingest = (
+            db.query(ErrorIngest)
+            .filter(ErrorIngest.id == payload["id"])
+            .one()
+        )
+        assert ingest.provider == provider
+        assert ingest.stack_trace
+
+        run = (
+            db.query(SandboxRun)
+            .filter(SandboxRun.id > last_run_id)
+            .order_by(SandboxRun.id.desc())
+            .first()
+        )
+        assert run is not None
+        assert run.status == "queued"
+        assert run.repo == "owner/repo"
+        assert run.stack_trace
+
+        gate = (
+            db.query(ApprovalGate)
+            .filter(
+                ApprovalGate.run_id == run.id,
+                ApprovalGate.gate == "sandbox_provision",
+            )
+            .order_by(ApprovalGate.id.desc())
+            .first()
+        )
+        assert gate is not None
+        assert gate.status == "pending"
+    finally:
+        db.close()
+
+    assert delayed == []
+
+
+def test_sentry_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
+    _override_secrets(monkeypatch)
+    delayed = _stub_run_side_effects(monkeypatch)
+    last_run_id, last_ingest_id = _seed_registered_repo()
+
+    body = json.dumps(_payload_with_repo(SENTRY_PAYLOAD)).encode()
+    response = client.post(
+        "/v1/webhooks/sentry",
+        content=body,
+        headers={"Sentry-Hook-Signature": _sign(body, SENTRY_SECRET)},
+    )
+    _assert_ingest_created_pending_run(
+        response=response,
+        delayed=delayed,
+        last_run_id=last_run_id,
+        last_ingest_id=last_ingest_id,
+        provider="sentry",
+    )
+
+
+def test_sentry_live_error_payload_creates_pending_gate_and_does_not_enqueue_clone(
+    monkeypatch,
+):
+    _override_secrets(monkeypatch)
+    delayed = _stub_run_side_effects(monkeypatch)
+    last_run_id, last_ingest_id = _seed_registered_repo()
+
+    body = json.dumps(LIVE_SENTRY_ERROR_PAYLOAD).encode()
+    response = client.post(
+        "/v1/webhooks/sentry",
+        content=body,
+        headers={"Sentry-Hook-Signature": _sign(body, SENTRY_SECRET)},
+    )
+    _assert_ingest_created_pending_run(
+        response=response,
+        delayed=delayed,
+        last_run_id=last_run_id,
+        last_ingest_id=last_ingest_id,
+        provider="sentry",
+    )
+    payload = response.json()
+    assert payload["exception_type"] == "ZeroDivisionError"
+    assert payload["frames"][0]["file"] == "test_app.py"
+    assert payload["frames"][0]["function"] == "trigger_error"
+    assert payload["frames"][0]["line"] == 10
+
+
+def test_datadog_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
+    _override_secrets(monkeypatch)
+    delayed = _stub_run_side_effects(monkeypatch)
+    last_run_id, last_ingest_id = _seed_registered_repo()
+
+    body = json.dumps(_payload_with_repo(DATADOG_PAYLOAD)).encode()
+    digest = _sign(body, DATADOG_SECRET)
+    response = client.post(
+        "/v1/webhooks/datadog",
+        content=body,
+        headers={"X-Datadog-Signature": f"sha256={digest}"},
+    )
+    _assert_ingest_created_pending_run(
+        response=response,
+        delayed=delayed,
+        last_run_id=last_run_id,
+        last_ingest_id=last_ingest_id,
+        provider="datadog",
+    )

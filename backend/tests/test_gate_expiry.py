@@ -122,6 +122,40 @@ def test_expire_stale_gates_skips_fresh_gates(monkeypatch):
     assert fresh.status == "pending"
 
 
+def test_expire_stale_gates_without_notify_still_recreates(monkeypatch):
+    pushes = []
+    monkeypatch.setattr(
+        "app.services.fcm.send_push",
+        lambda *a, **k: pushes.append(1) or "ok",
+    )
+    monkeypatch.setattr(
+        "app.services.fcm.send_push_with_timeout",
+        lambda *a, **k: pushes.append(1) or "ok",
+    )
+    run = SandboxRun(
+        id=1,
+        status="queued",
+        repo="a/b",
+        ref="main",
+        control_state="active",
+        pipeline_stage=STAGE_PROVISION,
+    )
+    gate = ApprovalGate(
+        id=1,
+        run_id=1,
+        gate="sandbox_provision",
+        status="pending",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    db = RecordingDB(run, [gate])
+    expired = expire_stale_gates(db, notify=False)
+    assert expired
+    assert gate.status == "expired"
+    pending = [g for g in db.gates if isinstance(g, ApprovalGate) and g.status == "pending"]
+    assert pending
+    assert pushes == []
+
+
 def test_resume_clone_stage_enqueues_clone(monkeypatch):
     delayed = []
     monkeypatch.setattr(

@@ -1,14 +1,15 @@
 from datetime import datetime, timezone
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, noload
 
 from app.auth import require_api_key
 from app.config import settings
 from app.db import get_db
-from app.models import ApprovalGate, AuditEvent, Device, Repository, SandboxRun
+from app.models import ApprovalGate, AuditEvent, Device, Repository, SandboxRun, Symbol
 from app.schemas import ApprovalRequest, RunControlRequest, SandboxRunCreate
 from app.services.approval import (
     MERGE_GATE,
@@ -38,6 +39,17 @@ from app.services.providers import get_sandbox_provider
 from app.workers.tasks import apply_patch_and_verify, clone_and_index, open_github_pr
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _enqueue(task, run_id: int) -> None:
+    result = task.delay(run_id)
+    logger.info(
+        "published celery task %s run_id=%s task_id=%s queue=celery",
+        getattr(task, "name", task),
+        run_id,
+        getattr(result, "id", None),
+    )
 
 
 def _require_device(db: Session, device_id: str) -> Device:
@@ -127,40 +139,40 @@ def resume_paused_run(run: SandboxRun, db: Session) -> None:
         run.status = "queued"
         gate = _latest_gate(db, run, SANDBOX_PROVISION_GATE)
         if gate is not None and gate.status == "approved":
-            clone_and_index.delay(run.id)
+            _enqueue(clone_and_index, run.id)
             return
         _ensure_pending_gate(db, run, SANDBOX_PROVISION_GATE)
         return
     if stage == STAGE_CLONE:
         run.status = "queued"
-        clone_and_index.delay(run.id)
+        _enqueue(clone_and_index, run.id)
         return
     if stage == STAGE_PATCH_REVIEW:
         run.status = "awaiting_patch_review"
         gate = _latest_gate(db, run, PATCH_REVIEW_GATE)
         if gate is not None and gate.status == "approved":
-            apply_patch_and_verify.delay(run.id)
+            _enqueue(apply_patch_and_verify, run.id)
             return
         _ensure_pending_gate(db, run, PATCH_REVIEW_GATE)
         return
     if stage == STAGE_PATCH_APPLY:
         run.status = "queued"
-        apply_patch_and_verify.delay(run.id)
+        _enqueue(apply_patch_and_verify, run.id)
         return
     if stage == STAGE_MERGE:
         run.status = "awaiting_merge"
         gate = _latest_gate(db, run, MERGE_GATE)
         if gate is not None and gate.status == "approved":
-            open_github_pr.delay(run.id)
+            _enqueue(open_github_pr, run.id)
             return
         _ensure_pending_gate(db, run, MERGE_GATE)
         return
     if stage == STAGE_PR:
         run.status = "queued"
-        open_github_pr.delay(run.id)
+        _enqueue(open_github_pr, run.id)
         return
     run.status = "queued"
-    clone_and_index.delay(run.id)
+    _enqueue(clone_and_index, run.id)
 
 
 @router.post(
@@ -187,12 +199,26 @@ def create_run(
         repo=body.repo,
         ref=body.ref,
         stack_trace=body.stack_trace,
+        pipeline_stage=STAGE_PROVISION,
     )
     db.add(run)
     db.commit()
     db.refresh(run)
-    create_pending_provision_gate(db, run)
-    return {"id": run.id, "status": run.status}
+    gate = create_pending_provision_gate(db, run)
+    _enqueue(clone_and_index, run.id)
+    logger.info(
+        "sandbox run %s queued with %s gate %s; clone_and_index published to celery",
+        run.id,
+        gate.gate,
+        gate.id,
+    )
+    return {
+        "id": run.id,
+        "status": run.status,
+        "pipeline_stage": run.pipeline_stage,
+        "approval_gate": gate.gate,
+        "approval_status": gate.status,
+    }
 
 
 @router.post(
@@ -241,11 +267,11 @@ def approve_sandbox(
     db.commit()
 
     if gate.gate == SANDBOX_PROVISION_GATE:
-        clone_and_index.delay(run.id)
+        _enqueue(clone_and_index, run.id)
     elif gate.gate == PATCH_REVIEW_GATE:
-        apply_patch_and_verify.delay(run.id)
+        _enqueue(apply_patch_and_verify, run.id)
     elif gate.gate == MERGE_GATE:
-        open_github_pr.delay(run.id)
+        _enqueue(open_github_pr, run.id)
 
     return {
         "ok": True,
@@ -399,7 +425,7 @@ def list_pending_approvals(
     device_id: str,
     db: Session = Depends(get_db),
 ):
-    expire_stale_gates(db)
+    expire_stale_gates(db, notify=False, limit=30)
     gates = (
         db.query(ApprovalGate, SandboxRun)
         .join(SandboxRun, ApprovalGate.run_id == SandboxRun.id)
@@ -449,7 +475,12 @@ def get_run(
         "control_state": run.control_state,
         "pipeline_stage": run.pipeline_stage,
         "patch_attempts": run.patch_attempts,
-        "symbol_count": len(run.symbols),
+        "symbol_count": (
+            db.query(func.count(Symbol.id))
+            .filter(Symbol.run_id == run.id)
+            .scalar()
+            or 0
+        ),
     }
 
 
@@ -524,10 +555,24 @@ def list_runs(
     limit = max(1, min(limit, 100))
     runs = (
         db.query(SandboxRun)
+        .options(
+            noload(SandboxRun.symbols),
+            noload(SandboxRun.approval_gates),
+            noload(SandboxRun.reproduction_attempts),
+            noload(SandboxRun.patch_records),
+            noload(SandboxRun.audit_events),
+        )
         .order_by(SandboxRun.id.desc())
         .limit(limit)
         .all()
     )
+    run_ids = [run.id for run in runs]
+    symbol_counts = dict(
+        db.query(Symbol.run_id, func.count(Symbol.id))
+        .filter(Symbol.run_id.in_(run_ids))
+        .group_by(Symbol.run_id)
+        .all()
+    ) if run_ids else {}
     stats = (
         db.query(
             func.count(SandboxRun.id).label("total"),
@@ -567,7 +612,7 @@ def list_runs(
                 "finished_at": (
                     run.finished_at.isoformat() if run.finished_at else None
                 ),
-                "symbol_count": len(run.symbols),
+                "symbol_count": symbol_counts.get(run.id, 0),
             }
             for run in runs
         ],

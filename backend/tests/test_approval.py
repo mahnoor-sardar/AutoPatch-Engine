@@ -122,9 +122,12 @@ def test_approval_accepts_valid_totp(monkeypatch):
     app.dependency_overrides[get_db] = lambda: db
     delayed = []
 
+    class Result:
+        id = "approval-task"
+
     monkeypatch.setattr(
         "app.routers.sandbox.clone_and_index.delay",
-        lambda run_id: delayed.append(run_id),
+        lambda run_id: delayed.append(run_id) or Result(),
     )
     try:
         code = pyotp.TOTP(secret).now()

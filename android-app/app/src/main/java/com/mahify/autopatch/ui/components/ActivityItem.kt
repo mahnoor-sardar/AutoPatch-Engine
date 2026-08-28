@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mahify.autopatch.model.HealthState
 import com.mahify.autopatch.model.PatchActivity
@@ -106,7 +107,9 @@ fun ActivityItem(
             Text(
                 text = activity.repository,
                 style = MaterialTheme.typography.bodySmall,
-                color = TextTertiary
+                color = TextTertiary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
 

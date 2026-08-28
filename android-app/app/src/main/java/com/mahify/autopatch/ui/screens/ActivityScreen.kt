@@ -150,7 +150,11 @@ private fun formatTimeAgo(timestamp: String?): String {
 
     return try {
 
-        val instant = Instant.parse(timestamp)
+        val instant = try {
+            Instant.parse(timestamp)
+        } catch (_: Exception) {
+            java.time.OffsetDateTime.parse(timestamp).toInstant()
+        }
         val now = Instant.now()
 
         val seconds = Duration.between(
@@ -170,7 +174,7 @@ private fun formatTimeAgo(timestamp: String?): String {
                 "${seconds / 3600} hr ago"
 
             seconds < 172800 ->
-                "1 day ago"
+                "Yesterday"
 
             else ->
                 "${seconds / 86400} days ago"

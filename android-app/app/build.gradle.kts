@@ -80,6 +80,12 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+    }
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
@@ -93,6 +99,9 @@ dependencies {
 
     implementation(
         "androidx.lifecycle:lifecycle-viewmodel-compose:2.9.2"
+    )
+    implementation(
+        "androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.2"
     )
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

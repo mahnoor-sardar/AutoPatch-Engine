@@ -27,6 +27,7 @@ def create_pending_gate(
     db: Session,
     run: SandboxRun,
     gate_name: str,
+    notify: bool = True,
 ) -> ApprovalGate:
     gate = ApprovalGate(
         run_id=run.id,
@@ -38,7 +39,8 @@ def create_pending_gate(
     db.add(gate)
     db.commit()
     db.refresh(gate)
-    notify_devices_of_approval_gate(db, run, gate)
+    if notify:
+        notify_devices_of_approval_gate(db, run, gate)
     return gate
 
 
@@ -69,7 +71,7 @@ def notify_devices_of_approval_gate(
     for device in db.query(Device).all():
         status = "sent"
         try:
-            fcm.send_push(device.fcm_token, title, body, data)
+            fcm.send_push_with_timeout(device.fcm_token, title, body, data)
         except Exception:
             status = "failed"
         db.add(
@@ -92,16 +94,24 @@ def gate_is_expired(gate: ApprovalGate, now: datetime | None = None) -> bool:
     return expires <= moment
 
 
-def expire_stale_gates(db: Session) -> list[ApprovalGate]:
-    pending = list(
+def expire_stale_gates(
+    db: Session,
+    *,
+    notify: bool = True,
+    limit: int | None = None,
+) -> list[ApprovalGate]:
+    query = (
         db.query(ApprovalGate)
         .filter(ApprovalGate.status == "pending")
-        .all()
+        .order_by(ApprovalGate.id.desc())
     )
+    if limit is not None:
+        query = query.limit(limit)
+    pending = list(query.all())
     expired: list[ApprovalGate] = []
     for gate in pending:
         if gate_is_expired(gate):
-            apply_gate_expiry(db, gate, recreate=True)
+            apply_gate_expiry(db, gate, recreate=True, notify=notify)
             expired.append(gate)
     return expired
 
@@ -110,6 +120,7 @@ def apply_gate_expiry(
     db: Session,
     gate: ApprovalGate,
     recreate: bool = True,
+    notify: bool = True,
 ) -> None:
     if gate.status != "pending":
         return
@@ -132,20 +143,21 @@ def apply_gate_expiry(
             result=RESULT_EXPIRED,
             event_metadata={"gate": gate.gate},
         )
-        from app.services.events import notify_run_event
+        if notify:
+            from app.services.events import notify_run_event
 
-        notify_run_event(
-            db,
-            run,
-            "Approval expired — run paused",
-            f"{run.repo} {gate.gate} timed out. Re-approval required.",
-            {
-                "escalation": "true",
-                "gate": gate.gate,
-                "expired": "true",
-            },
-        )
+            notify_run_event(
+                db,
+                run,
+                "Approval expired — run paused",
+                f"{run.repo} {gate.gate} timed out. Re-approval required.",
+                {
+                    "escalation": "true",
+                    "gate": gate.gate,
+                    "expired": "true",
+                },
+            )
         if recreate:
-            create_pending_gate(db, run, gate.gate)
+            create_pending_gate(db, run, gate.gate, notify=notify)
             return
     db.commit()

@@ -12,6 +12,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 
 data class BackendHealth(
@@ -68,9 +69,17 @@ data class RunDiagnosis(
 
 object ApiClient {
 
-    private val BASE_URL = BuildConfig.AUTOPATCH_BASE_URL
+    private const val LOG_TAG = "AutoPatchApproval"
 
-    private val client = OkHttpClient()
+    private val BASE_URL = BuildConfig.AUTOPATCH_BASE_URL.trimEnd('/')
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
 
     private fun apiKey(): String {
         return BuildConfig.AUTOPATCH_API_KEY
@@ -89,6 +98,11 @@ object ApiClient {
             ) ?: throw Exception("Unable to determine Android device ID")
 
         val label = Build.MODEL
+
+        Log.i(
+            LOG_TAG,
+            "registerDevice deviceId=$deviceId baseUrl=$BASE_URL"
+        )
 
         val json = JSONObject().apply {
             put("device_id", deviceId)
@@ -495,34 +509,48 @@ object ApiClient {
         deviceId: String
     ): List<com.mahify.autopatch.model.ApprovalRequest> =
         withContext(Dispatchers.IO) {
-
+            val url =
+                "$BASE_URL/v1/sandbox/approvals/pending" +
+                    "?device_id=" +
+                    java.net.URLEncoder.encode(deviceId, Charsets.UTF_8.name())
+            Log.i(
+                LOG_TAG,
+                "GET pending approvals baseUrl=$BASE_URL deviceId=$deviceId url=$url"
+            )
             val request = Request.Builder()
-                .url(
-                    "$BASE_URL/v1/sandbox/approvals/pending" +
-                        "?device_id=$deviceId"
-                )
-                .addHeader(
-                    "X-API-Key",
-                    apiKey()
-                )
+                .url(url)
+                .addHeader("X-API-Key", apiKey())
                 .get()
                 .build()
 
-            client.newCall(request).execute().use { response ->
-
-                if (!response.isSuccessful) {
-
-                    throw Exception(
-                        "Backend returned HTTP ${response.code}"
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
+                    Log.i(
+                        LOG_TAG,
+                        "GET pending HTTP ${response.code} bytes=${body.length} body=${body.take(500)}"
                     )
+                    if (!response.isSuccessful) {
+                        throw Exception(
+                            "Pending approvals HTTP ${response.code}: " +
+                                body.takeIf { it.isNotBlank() }
+                                    ?.take(300)
+                        )
+                    }
+                    if (body.isBlank()) {
+                        throw Exception("Pending approvals returned an empty body")
+                    }
+                    val parsed = ApprovalSubmit.parsePendingResponse(body)
+                    Log.i(
+                        LOG_TAG,
+                        "parsed pending count=${parsed.size} runIds=${parsed.map { it.runId }}"
+                    )
+                    parsed
                 }
-
-                val body = response.body?.string()
-                    ?: throw Exception(
-                        "Empty backend response"
-                    )
-
-                ApprovalSubmit.parsePendingResponse(body)
+            } catch (error: Exception) {
+                val described = NetworkErrors.describe(error, url, "Pending approvals")
+                Log.e(LOG_TAG, described, error)
+                throw Exception(described, error)
             }
         }
 

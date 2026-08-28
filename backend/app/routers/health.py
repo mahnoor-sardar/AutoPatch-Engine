@@ -19,7 +19,11 @@ def health() -> dict:
     except Exception:
         postgres_ok = False
     try:
-        redis_ok = bool(Redis.from_url(settings.redis_url, socket_connect_timeout=1).ping())
+        client = Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+        try:
+            redis_ok = bool(client.ping())
+        finally:
+            client.close()
     except Exception:
         redis_ok = False
     return {"ok": postgres_ok and redis_ok, "postgres": postgres_ok, "redis": redis_ok}

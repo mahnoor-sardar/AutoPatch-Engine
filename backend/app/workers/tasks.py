@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timezone
 
+from celery.exceptions import Retry
+
 from app.config import settings
 from app.db import SessionLocal
 from app.models import (
@@ -50,16 +52,33 @@ def _load_run(db, run_id: int) -> SandboxRun:
     return db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
 
 
-def _require_gate(db, run: SandboxRun, name: str) -> ApprovalGate:
-    gate = (
+def _latest_named_gate(db, run: SandboxRun, name: str) -> ApprovalGate | None:
+    return (
         db.query(ApprovalGate)
         .filter(ApprovalGate.run_id == run.id, ApprovalGate.gate == name)
         .order_by(ApprovalGate.id.desc())
         .first()
     )
+
+
+def _require_gate(db, run: SandboxRun, name: str) -> ApprovalGate:
+    gate = _latest_named_gate(db, run, name)
     if gate is None or gate.status != "approved":
         raise RuntimeError(f"{name} requires Android approval")
     return gate
+
+
+def _require_gate_or_retry(task, db, run: SandboxRun, name: str) -> ApprovalGate:
+    gate = _latest_named_gate(db, run, name)
+    if gate is not None and gate.status == "approved":
+        return gate
+    if (
+        gate is not None
+        and gate.status == "pending"
+        and not task.request.called_directly
+    ):
+        raise task.retry(countdown=2)
+    raise RuntimeError(f"{name} requires Android approval")
 
 
 def _control_or_stop(db, run: SandboxRun) -> bool:
@@ -83,25 +102,23 @@ def _finish(run: SandboxRun, started, status: str, error: str | None = None):
     run.duration_ms = int((finished - started).total_seconds() * 1000)
 
 
-@celery_app.task(name="clone_and_index")
+@celery_app.task(name="clone_and_index", max_retries=45, default_retry_delay=2)
 def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
-    run = _load_run(db, run_id)
-    _require_gate(db, run, "sandbox_provision")
-
-    if _control_or_stop(db, run):
-        db.close()
-        return
-
-    started = datetime.now(timezone.utc)
-    run.status = "running"
-    run.started_at = started
-    run.pipeline_stage = STAGE_CLONE
-    db.commit()
-    notify_run_event(db, run, "Sandbox running", f"{run.repo} clone started")
-
     sandbox = None
+    started = datetime.now(timezone.utc)
     try:
+        run = _load_run(db, run_id)
+        _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
+
+        if _control_or_stop(db, run):
+            return
+
+        run.status = "running"
+        run.started_at = started
+        run.pipeline_stage = STAGE_CLONE
+        db.commit()
+        notify_run_event(db, run, "Sandbox running", f"{run.repo} clone started")
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -312,6 +329,8 @@ def clone_and_index(run_id: int) -> None:
         _finish(run, started, "completed")
         db.commit()
         notify_run_event(db, run, "Run completed", f"{run.repo} finished")
+    except Retry:
+        raise
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
@@ -331,20 +350,19 @@ def clone_and_index(run_id: int) -> None:
 @celery_app.task(name="apply_patch_and_verify")
 def apply_patch_and_verify(run_id: int) -> None:
     db = SessionLocal()
-    run = _load_run(db, run_id)
-    _require_gate(db, run, PATCH_REVIEW_GATE)
-    if _control_or_stop(db, run):
-        db.close()
-        return
-    if not run.current_diff:
-        raise RuntimeError("no patch diff to apply")
-
-    started = datetime.now(timezone.utc)
-    run.status = "running"
-    run.pipeline_stage = STAGE_PATCH_APPLY
-    db.commit()
     sandbox = None
+    started = datetime.now(timezone.utc)
     try:
+        run = _load_run(db, run_id)
+        _require_gate(db, run, PATCH_REVIEW_GATE)
+        if _control_or_stop(db, run):
+            return
+        if not run.current_diff:
+            raise RuntimeError("no patch diff to apply")
+
+        run.status = "running"
+        run.pipeline_stage = STAGE_PATCH_APPLY
+        db.commit()
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -479,15 +497,14 @@ def apply_patch_and_verify(run_id: int) -> None:
 @celery_app.task(name="open_github_pr")
 def open_github_pr(run_id: int) -> None:
     db = SessionLocal()
-    run = _load_run(db, run_id)
-    _require_gate(db, run, MERGE_GATE)
-    if _control_or_stop(db, run):
-        db.close()
-        return
-    started = datetime.now(timezone.utc)
-    run.pipeline_stage = STAGE_PR
     sandbox = None
+    started = datetime.now(timezone.utc)
     try:
+        run = _load_run(db, run_id)
+        _require_gate(db, run, MERGE_GATE)
+        if _control_or_stop(db, run):
+            return
+        run.pipeline_stage = STAGE_PR
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -561,6 +578,6 @@ def expire_approval_gates() -> int:
 
     db = SessionLocal()
     try:
-        return len(expire_stale_gates(db))
+        return len(expire_stale_gates(db, limit=100))
     finally:
         db.close()

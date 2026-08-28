@@ -43,6 +43,71 @@ def test_missing_argument_typeerror_is_not_reproduced():
     assert result.reproduced is False
 
 
+def test_dummy_none_typeerror_is_not_zero_division_reproduction():
+    result = ReproductionResult(
+        exit_code=1,
+        stdout="",
+        stderr=(
+            "TypeError: unsupported operand type(s) for +: "
+            "'NoneType' and 'NoneType'"
+        ),
+        expected_exception="ZeroDivisionError",
+    )
+    assert result.reproduced is False
+
+
+def test_expected_exception_in_stderr_is_reproduced():
+    result = ReproductionResult(
+        exit_code=1,
+        stdout="",
+        stderr="ZeroDivisionError: division by zero",
+        expected_exception="ZeroDivisionError",
+    )
+    assert result.reproduced is True
+
+
+def test_run_reproduction_rejects_none_add_typeerror_for_zero_division(
+    monkeypatch,
+):
+    def fake_install(sandbox):
+        return (0, "installed", "")
+
+    monkeypatch.setattr(
+        "app.services.harness.install_project_dependencies",
+        fake_install,
+    )
+
+    class CommandFailed(Exception):
+        exit_code = 1
+        stdout = ""
+        stderr = (
+            "TypeError: unsupported operand type(s) for +: "
+            "'NoneType' and 'NoneType'"
+        )
+
+    def boom(command, timeout=30):
+        raise CommandFailed()
+
+    sandbox = SimpleNamespace(
+        write_file=lambda path, content: None,
+        run=boom,
+    )
+    test_source = """
+def test_reproduces_add_failure():
+    expected_exception = ZeroDivisionError
+    add(None, None)
+"""
+    result = run_reproduction_test(
+        sandbox,
+        "tests/autopatch_repro_test.py",
+        test_source,
+        install_dependencies=False,
+    )
+    assert result.synthesis_failed is False
+    assert result.expected_exception == "ZeroDivisionError"
+    assert result.reproduced is False
+
+
 def test_reproduction_skips_install_when_requested(monkeypatch):
     installs = []
 

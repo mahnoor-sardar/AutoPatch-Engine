@@ -1,10 +1,25 @@
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    expire_on_commit=False,
+)
 
 
 class Base(DeclarativeBase):
@@ -12,6 +27,15 @@ class Base(DeclarativeBase):
 
 
 def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def session_scope():
     db = SessionLocal()
     try:
         yield db
