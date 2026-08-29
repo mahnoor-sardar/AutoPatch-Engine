@@ -8,6 +8,7 @@ from e2b import Sandbox
 from app.services.providers import (
     COMMAND_TIMEOUT,
     get_sandbox_provider,
+    refresh_egress_allowlist,
     wrap_raw_sandbox,
 )
 
@@ -122,6 +123,7 @@ def clone_and_read_sources_in_sandbox(
 ):
     session = get_sandbox_provider().create()
     try:
+        refresh_egress_allowlist(session)
         files = clone_and_read_sources(
             sandbox=session,
             clone_url=clone_url,
@@ -149,6 +151,7 @@ def install_project_dependencies(sandbox: Sandbox) -> tuple[int, str, str]:
     stderr_parts: list[str] = []
 
     try:
+        refresh_egress_allowlist(_session(sandbox))
         if path_exists(sandbox, f"{root}/pyproject.toml"):
             result = _run(
                 sandbox,

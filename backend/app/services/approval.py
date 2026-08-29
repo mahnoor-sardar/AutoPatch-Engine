@@ -13,7 +13,7 @@ from app.services.audit import (
 SANDBOX_PROVISION_GATE = "sandbox_provision"
 PATCH_REVIEW_GATE = "patch_review"
 MERGE_GATE = "merge"
-GATE_TTL_SECONDS = 90
+GATE_TTL_SECONDS = 900
 
 STAGE_PROVISION = "provision"
 STAGE_CLONE = "clone"
@@ -48,7 +48,7 @@ def create_pending_provision_gate(
     db: Session,
     run: SandboxRun,
 ) -> ApprovalGate:
-    return create_pending_gate(db, run, SANDBOX_PROVISION_GATE)
+    return create_pending_gate(db, run, SANDBOX_PROVISION_GATE, notify=False)
 
 
 def notify_devices_of_approval_gate(
@@ -98,11 +98,17 @@ def expire_stale_gates(
     db: Session,
     *,
     notify: bool = True,
+    recreate: bool = False,
     limit: int | None = None,
 ) -> list[ApprovalGate]:
+    now = datetime.now(timezone.utc)
     query = (
         db.query(ApprovalGate)
-        .filter(ApprovalGate.status == "pending")
+        .filter(
+            ApprovalGate.status == "pending",
+            ApprovalGate.expires_at.isnot(None),
+            ApprovalGate.expires_at <= now,
+        )
         .order_by(ApprovalGate.id.desc())
     )
     if limit is not None:
@@ -110,9 +116,10 @@ def expire_stale_gates(
     pending = list(query.all())
     expired: list[ApprovalGate] = []
     for gate in pending:
-        if gate_is_expired(gate):
-            apply_gate_expiry(db, gate, recreate=True, notify=notify)
-            expired.append(gate)
+        if not gate_is_expired(gate):
+            continue
+        apply_gate_expiry(db, gate, recreate=recreate, notify=notify)
+        expired.append(gate)
     return expired
 
 

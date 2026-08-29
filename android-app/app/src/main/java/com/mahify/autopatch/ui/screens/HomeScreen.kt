@@ -631,7 +631,7 @@ private fun SandboxRun.toPatchActivity(): PatchActivity {
         repository = repo,
         status = when (status.lowercase()) {
             "completed" -> PatchStatus.COMPLETED
-            "failed" -> PatchStatus.FAILED
+            "failed", "killed", "rejected" -> PatchStatus.FAILED
             "running" -> PatchStatus.RUNNING
             else -> PatchStatus.QUEUED
         },

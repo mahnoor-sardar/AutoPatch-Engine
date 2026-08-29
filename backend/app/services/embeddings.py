@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_DIMENSIONS = 1536
 VECTOR_TABLE = "symbol_vectors"
+EMBED_BATCH_SIZE = 100
 
 NEAREST_SYMBOL_SQL = f"""
 SELECT s.id
@@ -72,15 +73,22 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     from litellm import embedding
 
-    kwargs: dict = {
-        "model": settings.embedding_model,
-        "input": texts,
-        "api_key": settings.llm_api_key,
-    }
-    if settings.llm_api_base:
-        kwargs["api_base"] = settings.llm_api_base
-    response = embedding(**kwargs)
-    return [item["embedding"] for item in response.data]
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), EMBED_BATCH_SIZE):
+        chunk = texts[start : start + EMBED_BATCH_SIZE]
+        kwargs: dict = {
+            "model": settings.embedding_model,
+            "input": chunk,
+            "api_key": settings.llm_api_key,
+            "dimensions": EMBEDDING_DIMENSIONS,
+        }
+        if settings.llm_api_base and not settings.embedding_model.startswith(
+            "gemini/"
+        ):
+            kwargs["api_base"] = settings.llm_api_base
+        response = embedding(**kwargs)
+        vectors.extend(item["embedding"] for item in response.data)
+    return vectors
 
 
 def store_symbol_embeddings(db: Session, run_id: int) -> None:

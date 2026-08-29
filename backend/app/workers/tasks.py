@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from celery.exceptions import Retry
+from celery.exceptions import MaxRetriesExceededError, Retry
 
 from app.config import settings
 from app.db import SessionLocal
@@ -22,6 +22,7 @@ from app.services.approval import (
     STAGE_PATCH_APPLY,
     STAGE_PATCH_REVIEW,
     STAGE_PR,
+    STAGE_PROVISION,
     create_pending_gate,
 )
 from app.services.audit import (
@@ -47,9 +48,178 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 MAX_PATCH_ATTEMPTS = 5
 
+TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected", "killed"})
+WAITING_STATUSES = frozenset(
+    {"queued", "paused", "awaiting_patch_review", "awaiting_merge"}
+)
+PROTECTED_STATUSES = TERMINAL_STATUSES | WAITING_STATUSES
+STAGE_RANK = {
+    STAGE_PROVISION: 0,
+    STAGE_CLONE: 1,
+    STAGE_PATCH_REVIEW: 2,
+    STAGE_PATCH_APPLY: 3,
+    STAGE_MERGE: 4,
+    STAGE_PR: 5,
+}
+
+
+def run_state_is_valid(run: SandboxRun) -> bool:
+    if run.status == "running" and run.finished_at is not None:
+        return False
+    if run.status in TERMINAL_STATUSES and run.finished_at is None:
+        return False
+    return True
+
+
+def _stage_rank(stage: str | None) -> int:
+    return STAGE_RANK.get(stage or STAGE_PROVISION, 0)
+
 
 def _load_run(db, run_id: int) -> SandboxRun:
     return db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+
+
+def _lock_run(db, run: SandboxRun) -> SandboxRun:
+    query = db.query(SandboxRun).filter(SandboxRun.id == run.id)
+    if hasattr(query, "with_for_update"):
+        query = query.with_for_update()
+    return query.one()
+
+
+def _mark_running(run: SandboxRun, stage: str, started) -> None:
+    run.status = "running"
+    run.pipeline_stage = stage
+    run.started_at = started
+    run.finished_at = None
+    run.duration_ms = None
+
+
+def _ensure_finished_at(run: SandboxRun, started=None) -> None:
+    if run.finished_at is not None:
+        return
+    finished = datetime.now(timezone.utc)
+    run.finished_at = finished
+    start = started or run.started_at
+    if start is None:
+        return
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    run.duration_ms = int((finished - start).total_seconds() * 1000)
+
+
+def _repair_stale_clone(run: SandboxRun) -> None:
+    if run.current_diff:
+        run.status = "awaiting_patch_review"
+        run.pipeline_stage = STAGE_PATCH_REVIEW
+    else:
+        run.status = "completed"
+        run.pipeline_stage = STAGE_CLONE
+    _ensure_finished_at(run)
+
+
+def _latest_patch_attempt(db, run: SandboxRun) -> PatchAttempt | None:
+    return (
+        db.query(PatchAttempt)
+        .filter(PatchAttempt.run_id == run.id)
+        .order_by(PatchAttempt.id.desc())
+        .first()
+    )
+
+
+def _repair_stale_apply(db, run: SandboxRun) -> None:
+    record = _latest_patch_attempt(db, run)
+    if record is not None and record.status == "applied":
+        run.status = "awaiting_merge"
+        run.pipeline_stage = STAGE_MERGE
+    elif run.patch_attempts >= MAX_PATCH_ATTEMPTS:
+        run.status = "failed"
+        if not run.error:
+            run.error = "patch attempts exhausted"
+    else:
+        run.status = "awaiting_patch_review"
+        run.pipeline_stage = STAGE_PATCH_REVIEW
+    _ensure_finished_at(run)
+
+
+def _claim_clone_stage(db, run: SandboxRun, started) -> bool:
+    run = _lock_run(db, run)
+    if run.status in TERMINAL_STATUSES:
+        _ensure_finished_at(run)
+        db.commit()
+        return False
+    if run.status in ("awaiting_patch_review", "awaiting_merge", "paused"):
+        return False
+    if _stage_rank(run.pipeline_stage) > _stage_rank(STAGE_CLONE):
+        return False
+    if run.status == "running" and run.pipeline_stage == STAGE_CLONE:
+        if run.finished_at is not None:
+            _repair_stale_clone(run)
+            db.commit()
+            return False
+        _mark_running(run, STAGE_CLONE, started)
+        db.commit()
+        return True
+    if run.status != "queued":
+        return False
+    _mark_running(run, STAGE_CLONE, started)
+    db.commit()
+    return True
+
+
+def _claim_apply_stage(db, run: SandboxRun, started) -> bool:
+    run = _lock_run(db, run)
+    if run.status in TERMINAL_STATUSES:
+        _ensure_finished_at(run)
+        db.commit()
+        return False
+    if run.status == "awaiting_merge":
+        return False
+    if _stage_rank(run.pipeline_stage) > _stage_rank(STAGE_PATCH_APPLY):
+        return False
+    if run.status == "running" and run.pipeline_stage == STAGE_PATCH_APPLY:
+        if run.finished_at is not None:
+            _repair_stale_apply(db, run)
+            db.commit()
+            return False
+        _mark_running(run, STAGE_PATCH_APPLY, started)
+        db.commit()
+        return True
+    if run.status not in ("awaiting_patch_review", "queued"):
+        return False
+    if run.status == "queued" and _stage_rank(run.pipeline_stage) < _stage_rank(
+        STAGE_PATCH_APPLY
+    ):
+        return False
+    _mark_running(run, STAGE_PATCH_APPLY, started)
+    db.commit()
+    return True
+
+
+def _claim_pr_stage(db, run: SandboxRun, started) -> bool:
+    run = _lock_run(db, run)
+    if run.pr_url:
+        if run.status != "completed":
+            run.status = "completed"
+            _ensure_finished_at(run)
+            db.commit()
+        return False
+    if run.status in TERMINAL_STATUSES:
+        _ensure_finished_at(run)
+        db.commit()
+        return False
+    if run.status == "running" and run.pipeline_stage == STAGE_PR:
+        if run.finished_at is not None:
+            run.status = "completed" if run.pr_url else "failed"
+            db.commit()
+            return False
+        _mark_running(run, STAGE_PR, started)
+        db.commit()
+        return True
+    if run.status != "awaiting_merge":
+        return False
+    _mark_running(run, STAGE_PR, started)
+    db.commit()
+    return True
 
 
 def _latest_named_gate(db, run: SandboxRun, name: str) -> ApprovalGate | None:
@@ -68,26 +238,40 @@ def _require_gate(db, run: SandboxRun, name: str) -> ApprovalGate:
     return gate
 
 
-def _require_gate_or_retry(task, db, run: SandboxRun, name: str) -> ApprovalGate:
+def _require_gate_or_retry(task, db, run: SandboxRun, name: str) -> ApprovalGate | None:
     gate = _latest_named_gate(db, run, name)
+    db.refresh(run)
+    if run.status in ("rejected", "killed") or run.control_state == "killed":
+        return None
     if gate is not None and gate.status == "approved":
         return gate
-    if (
-        gate is not None
-        and gate.status == "pending"
-        and not task.request.called_directly
-    ):
-        raise task.retry(countdown=2)
+    if gate is not None and gate.status == "pending":
+        if task.request.called_directly:
+            raise RuntimeError(f"{name} requires Android approval")
+        try:
+            raise task.retry(countdown=5)
+        except MaxRetriesExceededError:
+            logger.info(
+                "still waiting for %s approval run_id=%s; leaving queued",
+                name,
+                run.id,
+            )
+            return None
+    if gate is not None and gate.status in ("expired", "rejected"):
+        return None
     raise RuntimeError(f"{name} requires Android approval")
 
 
 def _control_or_stop(db, run: SandboxRun) -> bool:
     db.refresh(run)
-    if run.control_state == "killed":
+    if run.control_state == "killed" or run.status == "killed":
         run.status = "killed"
+        _ensure_finished_at(run)
         db.commit()
         return True
-    if run.control_state == "paused":
+    if run.status == "rejected":
+        return True
+    if run.control_state == "paused" or run.status == "paused":
         run.status = "paused"
         db.commit()
         return True
@@ -102,22 +286,23 @@ def _finish(run: SandboxRun, started, status: str, error: str | None = None):
     run.duration_ms = int((finished - started).total_seconds() * 1000)
 
 
-@celery_app.task(name="clone_and_index", max_retries=45, default_retry_delay=2)
+@celery_app.task(name="clone_and_index", max_retries=180, default_retry_delay=5)
 def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
     try:
         run = _load_run(db, run_id)
-        _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
+        gate = _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
+        if gate is None:
+            return
 
         if _control_or_stop(db, run):
             return
 
-        run.status = "running"
-        run.started_at = started
-        run.pipeline_stage = STAGE_CLONE
-        db.commit()
+        if not _claim_clone_stage(db, run, started):
+            return
+
         notify_run_event(db, run, "Sandbox running", f"{run.repo} clone started")
         repo = (
             db.query(Repository)
@@ -331,9 +516,14 @@ def clone_and_index(run_id: int) -> None:
         notify_run_event(db, run, "Run completed", f"{run.repo} finished")
     except Retry:
         raise
+    except MaxRetriesExceededError:
+        logger.info("clone_and_index waiting on approval run_id=%s", run_id)
+        return
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
+        if run.status in PROTECTED_STATUSES:
+            return
         _finish(run, started, "failed", str(exc))
         db.commit()
         notify_run_event(db, run, "Run failed", str(exc)[:180])
@@ -357,12 +547,13 @@ def apply_patch_and_verify(run_id: int) -> None:
         _require_gate(db, run, PATCH_REVIEW_GATE)
         if _control_or_stop(db, run):
             return
+        if not _claim_apply_stage(db, run, started):
+            return
         if not run.current_diff:
-            raise RuntimeError("no patch diff to apply")
+            _finish(run, started, "failed", "no patch diff to apply")
+            db.commit()
+            return
 
-        run.status = "running"
-        run.pipeline_stage = STAGE_PATCH_APPLY
-        db.commit()
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -482,6 +673,8 @@ def apply_patch_and_verify(run_id: int) -> None:
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
+        if run.status in PROTECTED_STATUSES:
+            return
         _finish(run, started, "failed", str(exc))
         db.commit()
         raise
@@ -504,7 +697,8 @@ def open_github_pr(run_id: int) -> None:
         _require_gate(db, run, MERGE_GATE)
         if _control_or_stop(db, run):
             return
-        run.pipeline_stage = STAGE_PR
+        if not _claim_pr_stage(db, run, started):
+            return
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -560,6 +754,8 @@ def open_github_pr(run_id: int) -> None:
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
+        if run.status in PROTECTED_STATUSES:
+            return
         _finish(run, started, "failed", str(exc))
         db.commit()
         raise
@@ -578,6 +774,6 @@ def expire_approval_gates() -> int:
 
     db = SessionLocal()
     try:
-        return len(expire_stale_gates(db, limit=100))
+        return len(expire_stale_gates(db, notify=False, recreate=False, limit=100))
     finally:
         db.close()

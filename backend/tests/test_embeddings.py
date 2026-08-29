@@ -23,6 +23,103 @@ def test_similar_symbols_is_empty_without_pgvector(monkeypatch):
     assert result == []
 
 
+def test_embed_texts_batches_and_preserves_order(monkeypatch):
+    from app.services import embeddings
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(settings, "llm_api_base", "")
+    sizes = []
+
+    def fake_embedding(**kwargs):
+        chunk = kwargs["input"]
+        assert len(chunk) <= embeddings.EMBED_BATCH_SIZE
+        sizes.append(len(chunk))
+        data = [{"embedding": [float(len(text))]} for text in chunk]
+        return SimpleNamespace(data=data)
+
+    monkeypatch.setattr("litellm.embedding", fake_embedding)
+
+    def run(n: int) -> None:
+        sizes.clear()
+        texts = [f"t{i}" for i in range(n)]
+        result = embeddings.embed_texts(texts)
+        assert [v[0] for v in result] == [float(len(t)) for t in texts]
+        assert max(sizes) <= 100
+        expected_calls = (n + 99) // 100
+        assert len(sizes) == expected_calls
+        if n % 100:
+            assert sizes[-1] == n % 100
+        else:
+            assert sizes[-1] == 100
+
+    run(99)
+    run(100)
+    run(101)
+    run(524)
+
+
+def test_embed_texts_omits_api_base_for_gemini_embedding_models(monkeypatch):
+    from app.services import embeddings
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(
+        settings,
+        "llm_api_base",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+    seen = []
+
+    def fake_embedding(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(data=[{"embedding": [0.0]}])
+
+    monkeypatch.setattr("litellm.embedding", fake_embedding)
+
+    monkeypatch.setattr(settings, "embedding_model", "gemini/gemini-embedding-001")
+    embeddings.embed_texts(["symbol"])
+    assert seen
+    assert "api_base" not in seen[0]
+    assert seen[0]["model"] == "gemini/gemini-embedding-001"
+
+    seen.clear()
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-3-small")
+    embeddings.embed_texts(["symbol"])
+    assert seen
+    assert seen[0]["api_base"] == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+    assert seen[0]["model"] == "text-embedding-3-small"
+
+
+def test_embed_texts_requests_1536_dimensions(monkeypatch):
+    from app.services import embeddings
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+    monkeypatch.setattr(settings, "llm_api_base", "")
+    seen = []
+
+    def fake_embedding(**kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(data=[{"embedding": [0.0]}])
+
+    monkeypatch.setattr("litellm.embedding", fake_embedding)
+    embeddings.embed_texts(["symbol"])
+    assert seen
+    assert seen[0]["dimensions"] == embeddings.EMBEDDING_DIMENSIONS
+    assert seen[0]["dimensions"] == 1536
+
+
+def test_embed_texts_empty_without_key(monkeypatch):
+    from app.services import embeddings
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    assert embeddings.embed_texts(["a"]) == [[]]
+
+
 def test_store_embeddings_skips_without_pgvector(monkeypatch):
     from app.services import embeddings
 

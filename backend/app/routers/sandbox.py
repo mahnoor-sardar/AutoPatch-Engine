@@ -3,7 +3,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, noload
 
 from app.auth import require_api_key
@@ -52,6 +52,15 @@ def _enqueue(task, run_id: int) -> None:
     )
 
 
+def _enqueue_for_gate(gate_name: str, run_id: int) -> None:
+    if gate_name == SANDBOX_PROVISION_GATE:
+        _enqueue(clone_and_index, run_id)
+    elif gate_name == PATCH_REVIEW_GATE:
+        _enqueue(apply_patch_and_verify, run_id)
+    elif gate_name == MERGE_GATE:
+        _enqueue(open_github_pr, run_id)
+
+
 def _require_device(db: Session, device_id: str) -> Device:
     device = (
         db.query(Device)
@@ -82,7 +91,7 @@ def _pending_gate(db: Session, run: SandboxRun, gate_name: str | None = None):
 
 def _expire_if_needed(db: Session, gate: ApprovalGate) -> None:
     if gate_is_expired(gate) and gate.status == "pending":
-        apply_gate_expiry(db, gate, recreate=True)
+        apply_gate_expiry(db, gate, recreate=False, notify=False)
         raise HTTPException(
             status_code=409,
             detail="approval gate has expired",
@@ -231,8 +240,27 @@ def approve_sandbox(
     db: Session = Depends(get_db),
 ):
     run = _require_run(db, run_id)
+    if run.control_state == "killed":
+        raise HTTPException(status_code=409, detail="run was killed")
+
     gate = _pending_gate(db, run)
     if gate is None:
+        latest = (
+            db.query(ApprovalGate)
+            .filter(ApprovalGate.run_id == run.id)
+            .order_by(ApprovalGate.id.desc())
+            .first()
+        )
+        if latest is not None and latest.status == "approved":
+            _unpause_on_approve(run)
+            db.commit()
+            _enqueue_for_gate(latest.gate, run.id)
+            return {
+                "ok": True,
+                "run_id": run.id,
+                "gate": latest.gate,
+                "status": latest.status,
+            }
         raise HTTPException(status_code=404, detail="approval gate not found")
 
     _expire_if_needed(db, gate)
@@ -247,13 +275,12 @@ def approve_sandbox(
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
-    if run.control_state == "killed":
-        raise HTTPException(status_code=409, detail="run was killed")
-
     _unpause_on_approve(run)
     gate.status = "approved"
     gate.device_id = device.device_id
     gate.approved_at = datetime.now(timezone.utc)
+    if run.status in ("paused",):
+        run.status = "queued"
     log_audit(
         db,
         "approve",
@@ -265,14 +292,16 @@ def approve_sandbox(
         event_metadata={"gate": gate.gate},
     )
     db.commit()
-
-    if gate.gate == SANDBOX_PROVISION_GATE:
-        _enqueue(clone_and_index, run.id)
-    elif gate.gate == PATCH_REVIEW_GATE:
-        _enqueue(apply_patch_and_verify, run.id)
-    elif gate.gate == MERGE_GATE:
-        _enqueue(open_github_pr, run.id)
-
+    _enqueue_for_gate(gate.gate, run.id)
+    publish_run_update(
+        {
+            "type": "approval",
+            "run_id": run.id,
+            "status": run.status,
+            "gate": gate.gate,
+            "gate_status": gate.status,
+        }
+    )
     return {
         "ok": True,
         "run_id": run.id,
@@ -293,6 +322,14 @@ def reject_sandbox(
     run = _require_run(db, run_id)
     gate = _pending_gate(db, run)
     if gate is None:
+        latest = (
+            db.query(ApprovalGate)
+            .filter(ApprovalGate.run_id == run.id)
+            .order_by(ApprovalGate.id.desc())
+            .first()
+        )
+        if latest is not None and latest.status == "rejected":
+            return {"ok": True, "run_id": run.id, "status": "rejected"}
         raise HTTPException(status_code=404, detail="approval gate not found")
     _expire_if_needed(db, gate)
     device = _require_device(db, body.device_id)
@@ -320,6 +357,14 @@ def reject_sandbox(
         event_metadata={"gate": gate.gate},
     )
     db.commit()
+    publish_run_update(
+        {
+            "type": "rejection",
+            "run_id": run.id,
+            "status": run.status,
+            "gate": gate.gate,
+        }
+    )
     return {"ok": True, "run_id": run.id, "status": "rejected"}
 
 
@@ -425,13 +470,18 @@ def list_pending_approvals(
     device_id: str,
     db: Session = Depends(get_db),
 ):
-    expire_stale_gates(db, notify=False, limit=30)
+    expire_stale_gates(db, notify=False, recreate=False, limit=20)
+    now = datetime.now(timezone.utc)
     gates = (
         db.query(ApprovalGate, SandboxRun)
         .join(SandboxRun, ApprovalGate.run_id == SandboxRun.id)
         .filter(
             ApprovalGate.status == "pending",
-            ApprovalGate.expires_at > datetime.now(timezone.utc),
+            ApprovalGate.expires_at > now,
+            or_(
+                ApprovalGate.device_id.is_(None),
+                ApprovalGate.device_id == device_id,
+            ),
         )
         .order_by(ApprovalGate.id.desc())
         .all()
@@ -448,7 +498,6 @@ def list_pending_approvals(
                 ),
             }
             for gate, run in gates
-            if gate.device_id is None or gate.device_id == device_id
         ]
     }
 

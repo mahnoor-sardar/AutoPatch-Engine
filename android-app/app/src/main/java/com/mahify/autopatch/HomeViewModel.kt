@@ -45,6 +45,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val refreshMutex = Mutex()
     private var lastHealthAtMs = 0L
     private var refreshInFlight = false
+    private var approvalSubmitInFlight = false
 
     init {
         refresh()
@@ -68,9 +69,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun refreshInternal(
         showLoading: Boolean,
-        includeHealth: Boolean
+        includeHealth: Boolean,
+        waitForLock: Boolean = false
     ) {
-        if (refreshInFlight || !refreshMutex.tryLock()) {
+        if (waitForLock) {
+            refreshMutex.lock()
+        } else if (refreshInFlight || !refreshMutex.tryLock()) {
             Log.i(LOG_TAG, "skip refresh stacking inFlight=$refreshInFlight")
             return
         }
@@ -184,7 +188,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val message = e.message ?: "Unable to load pending approvals"
             Log.e(LOG_TAG, "HomeUiState approvalError=$message", e)
             _uiState.value = _uiState.value.copy(
-                approvalError = message
+                approvalError = message,
+                pendingApprovals = _uiState.value.pendingApprovals
             )
         }
     }
@@ -210,25 +215,41 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
+        if (approvalSubmitInFlight || _uiState.value.approvalLoading) {
+            return
+        }
         viewModelScope.launch {
+            if (approvalSubmitInFlight) return@launch
+            approvalSubmitInFlight = true
             _uiState.value = _uiState.value.copy(approvalLoading = true)
             try {
-                ApiClient.rejectSandbox(
-                    submitRunId,
-                    getDeviceId(context),
-                    trimmedOtp
+                refreshMutex.withLock {
+                    ApiClient.rejectSandbox(
+                        submitRunId,
+                        getDeviceId(context),
+                        trimmedOtp
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        pendingApprovals = _uiState.value.pendingApprovals
+                            .filterNot {
+                                ApprovalSubmit.itemKey(it) ==
+                                    ApprovalSubmit.itemKey(displayed)
+                            },
+                        approvalLoading = false
+                    )
+                }
+                refreshInternal(
+                    showLoading = false,
+                    includeHealth = false,
+                    waitForLock = true
                 )
-                _uiState.value = _uiState.value.copy(
-                    pendingApprovals = _uiState.value.pendingApprovals
-                        .filterNot { it.runId == submitRunId },
-                    approvalLoading = false
-                )
-                refresh()
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     approvalLoading = false,
                     approvalError = e.message ?: "Reject failed"
                 )
+            } finally {
+                approvalSubmitInFlight = false
             }
         }
     }
@@ -265,28 +286,44 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
+        if (approvalSubmitInFlight || _uiState.value.approvalLoading) {
+            return
+        }
         viewModelScope.launch {
+            if (approvalSubmitInFlight) return@launch
+            approvalSubmitInFlight = true
             _uiState.value = _uiState.value.copy(approvalLoading = true)
             try {
                 val ts = System.currentTimeMillis() / 1000L
                 val payload = "$deviceId|$submitRunId|$gate"
-                ApiClient.approveWithToken(
-                    submitRunId,
-                    deviceId,
-                    Totp.approvalToken(secret, payload, ts),
-                    ts
+                refreshMutex.withLock {
+                    ApiClient.approveWithToken(
+                        submitRunId,
+                        deviceId,
+                        Totp.approvalToken(secret, payload, ts),
+                        ts
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        pendingApprovals = _uiState.value.pendingApprovals
+                            .filterNot {
+                                ApprovalSubmit.itemKey(it) ==
+                                    ApprovalSubmit.itemKey(displayed)
+                            },
+                        approvalLoading = false
+                    )
+                }
+                refreshInternal(
+                    showLoading = false,
+                    includeHealth = false,
+                    waitForLock = true
                 )
-                _uiState.value = _uiState.value.copy(
-                    pendingApprovals = _uiState.value.pendingApprovals
-                        .filterNot { it.runId == submitRunId },
-                    approvalLoading = false
-                )
-                refresh()
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     approvalLoading = false,
                     approvalError = e.message ?: "Approval failed"
                 )
+            } finally {
+                approvalSubmitInFlight = false
             }
         }
     }
@@ -325,8 +362,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        viewModelScope.launch {
+        if (approvalSubmitInFlight || _uiState.value.approvalLoading) {
+            return
+        }
 
+        viewModelScope.launch {
+            if (approvalSubmitInFlight) return@launch
+            approvalSubmitInFlight = true
             _uiState.value = _uiState.value.copy(
                 approvalLoading = true,
                 approvalError = null
@@ -334,29 +376,35 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 val deviceId = getDeviceId(context)
-
-                ApiClient.approveSandbox(
-                    runId = submitRunId,
-                    deviceId = deviceId,
-                    otpCode = trimmedOtp
+                refreshMutex.withLock {
+                    ApiClient.approveSandbox(
+                        runId = submitRunId,
+                        deviceId = deviceId,
+                        otpCode = trimmedOtp
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        pendingApprovals = _uiState.value.pendingApprovals
+                            .filterNot {
+                                ApprovalSubmit.itemKey(it) ==
+                                    ApprovalSubmit.itemKey(displayed)
+                            },
+                        approvalLoading = false,
+                        approvalError = null
+                    )
+                }
+                refreshInternal(
+                    showLoading = false,
+                    includeHealth = false,
+                    waitForLock = true
                 )
-
-                _uiState.value = _uiState.value.copy(
-                    pendingApprovals = _uiState.value.pendingApprovals
-                        .filterNot { it.runId == submitRunId },
-                    approvalLoading = false,
-                    approvalError = null
-                )
-
-                refresh()
-
             } catch (e: Exception) {
-
                 _uiState.value = _uiState.value.copy(
                     approvalLoading = false,
                     approvalError =
                         e.message ?: "Approval failed"
                 )
+            } finally {
+                approvalSubmitInFlight = false
             }
         }
     }

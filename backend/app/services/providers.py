@@ -1,10 +1,26 @@
 from abc import ABC, abstractmethod
+import os
 from typing import Any
 
 from e2b import Sandbox
 from e2b.sandbox.network import ALL_TRAFFIC
 
 from app.config import settings
+
+
+def e2b_api_key() -> str:
+    """Same source of truth as Sandbox.create: settings, then process env."""
+    return (
+        (settings.e2b_api_key or "").strip()
+        or (os.environ.get("E2B_API_KEY") or "").strip()
+    )
+
+
+def e2b_auth_kwargs() -> dict[str, str]:
+    key = e2b_api_key()
+    if not key:
+        return {}
+    return {"api_key": key}
 
 COMMAND_TIMEOUT = 120
 SANDBOX_TIMEOUT = 15 * 60
@@ -62,7 +78,24 @@ if "$IPTABLES" -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; t
 else
   "$IPTABLES" -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 fi
+GITHUB_V4="$(
+  getent ahosts github.com 2>/dev/null | awk '{{print $1}}' | sort -u | while read -r ip; do
+    case "$ip" in
+      *:*) ;;
+      '') ;;
+      *) printf '%s\\n' "$ip" ;;
+    esac
+  done
+)"
+if [ -n "$GITHUB_V4" ]; then
+  for ip in $GITHUB_V4; do
+    "$IPTABLES" -A OUTPUT -d "$ip" -j ACCEPT
+  done
+fi
 for host in {hosts}; do
+  if [ "$host" = github.com ]; then
+    continue
+  fi
   getent ahosts "$host" 2>/dev/null | awk '{{print $1}}' | sort -u | while read -r ip; do
     case "$ip" in
       *:* ) "$IPTABLES" -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null || true ;;
@@ -70,14 +103,39 @@ for host in {hosts}; do
     esac
   done
 done
+HOSTS=/etc/hosts
+BEGIN='# BEGIN autopatch-github-ipv4-pin'
+END='# END autopatch-github-ipv4-pin'
+if grep -qF "$BEGIN" "$HOSTS" 2>/dev/null; then
+  sed -i "\\|$BEGIN|,\\|$END|d" "$HOSTS"
+fi
+if [ -n "$GITHUB_V4" ]; then
+  {{
+    printf '%s\\n' "$BEGIN"
+    for ip in $GITHUB_V4; do
+      printf '%s github.com\\n' "$ip"
+    done
+    printf '%s\\n' "$END"
+  }} >> "$HOSTS"
+fi
 """
 
 
 PRIVILEGED_USER = "root"
 
 
-def apply_egress_filter(session: "SandboxSession") -> None:
+def refresh_egress_allowlist(session: "SandboxSession") -> None:
+    """Rebuild OUTPUT DROP + dest ACCEPTs and pin github.com to the same IPv4 snapshot."""
     session.run(_egress_filter_script(), timeout=COMMAND_TIMEOUT, user=PRIVILEGED_USER)
+
+
+def apply_egress_filter(session: "SandboxSession") -> None:
+    refresh_egress_allowlist(session)
+
+
+def pin_github_ipv4_hosts(session: "SandboxSession") -> None:
+    """Same snapshot as iptables; URL host stays github.com."""
+    refresh_egress_allowlist(session)
 
 
 def disk_quota_script() -> str:
@@ -254,9 +312,8 @@ class E2BSandboxProvider(SandboxProvider):
             "timeout": SANDBOX_TIMEOUT,
             "network": sandbox_network_policy(),
             "allow_internet_access": True,
+            **e2b_auth_kwargs(),
         }
-        if settings.e2b_api_key:
-            kwargs["api_key"] = settings.e2b_api_key
         sandbox = Sandbox.create(**kwargs)
         session = E2BSession(sandbox)
         try:
@@ -268,11 +325,12 @@ class E2BSandboxProvider(SandboxProvider):
         return session
 
     def kill(self, sandbox_id: str) -> None:
+        auth = e2b_auth_kwargs()
         connect = getattr(Sandbox, "connect", None)
         if connect is not None:
-            connect(sandbox_id).kill()
+            connect(sandbox_id, **auth).kill()
             return
-        Sandbox(sandbox_id).kill()
+        Sandbox(sandbox_id, **auth).kill()
 
 
 def wrap_raw_sandbox(sandbox: Sandbox) -> E2BSession:

@@ -5,6 +5,13 @@ class LlmNotConfigured(RuntimeError):
     pass
 
 
+def _litellm_chat_model(model: str) -> str:
+    name = (model or "").strip()
+    if name.startswith("gemini/") or not name.startswith("gemini"):
+        return name
+    return f"gemini/{name}"
+
+
 def generate_patch(
     *,
     path: str,
@@ -31,7 +38,7 @@ def generate_patch(
     )
 
     kwargs: dict = {
-        "model": settings.llm_model,
+        "model": _litellm_chat_model(settings.llm_model),
         "messages": [{"role": "user", "content": prompt}],
         "api_key": settings.llm_api_key,
     }

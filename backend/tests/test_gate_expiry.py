@@ -21,6 +21,12 @@ class Query:
     def order_by(self, *args, **kwargs):
         return self
 
+    def limit(self, n):
+        return self
+
+    def with_for_update(self, *args, **kwargs):
+        return self
+
     def all(self):
         if self._result is None:
             return []
@@ -122,7 +128,7 @@ def test_expire_stale_gates_skips_fresh_gates(monkeypatch):
     assert fresh.status == "pending"
 
 
-def test_expire_stale_gates_without_notify_still_recreates(monkeypatch):
+def test_expire_stale_gates_without_notify_does_not_recreate(monkeypatch):
     pushes = []
     monkeypatch.setattr(
         "app.services.fcm.send_push",
@@ -148,11 +154,12 @@ def test_expire_stale_gates_without_notify_still_recreates(monkeypatch):
         expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
     )
     db = RecordingDB(run, [gate])
-    expired = expire_stale_gates(db, notify=False)
+    expired = expire_stale_gates(db, notify=False, recreate=False)
     assert expired
     assert gate.status == "expired"
+    assert run.status == "paused"
     pending = [g for g in db.gates if isinstance(g, ApprovalGate) and g.status == "pending"]
-    assert pending
+    assert pending == []
     assert pushes == []
 
 

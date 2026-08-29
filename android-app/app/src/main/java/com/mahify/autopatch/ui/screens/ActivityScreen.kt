@@ -197,10 +197,10 @@ private fun SandboxRun.toPatchActivity(): PatchActivity {
         "running" ->
             PatchStatus.RUNNING
 
-        "failed" ->
+        "failed", "killed", "rejected" ->
             PatchStatus.FAILED
 
-        "queued" ->
+        "queued", "paused", "awaiting_patch_review", "awaiting_merge" ->
             PatchStatus.QUEUED
 
         else ->
@@ -246,14 +246,11 @@ fun ActivityScreen(
 
             ActivityFilter.RUNNING ->
                 uiState.runs.filter {
-                    it.status.equals(
-                        "running",
-                        ignoreCase = true
-                    ) ||
-                        it.status.equals(
-                            "queued",
-                            ignoreCase = true
-                        )
+                    it.status.equals("running", ignoreCase = true) ||
+                        it.status.equals("queued", ignoreCase = true) ||
+                        it.status.equals("paused", ignoreCase = true) ||
+                        it.status.equals("awaiting_patch_review", ignoreCase = true) ||
+                        it.status.equals("awaiting_merge", ignoreCase = true)
                 }
 
             ActivityFilter.COMPLETED ->
@@ -266,10 +263,9 @@ fun ActivityScreen(
 
             ActivityFilter.FAILED ->
                 uiState.runs.filter {
-                    it.status.equals(
-                        "failed",
-                        ignoreCase = true
-                    )
+                    it.status.equals("failed", ignoreCase = true) ||
+                        it.status.equals("killed", ignoreCase = true) ||
+                        it.status.equals("rejected", ignoreCase = true)
                 }
         }
     }

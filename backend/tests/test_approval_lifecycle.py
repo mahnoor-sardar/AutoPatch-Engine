@@ -1,0 +1,283 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi.testclient import TestClient
+
+from app.db import get_db
+from app.main import app
+from app.models import ApprovalGate, Device, Repository, SandboxRun
+from app.services.approval import SANDBOX_PROVISION_GATE, expire_stale_gates
+from app.services.totp import new_secret
+from app.workers.tasks import _require_gate_or_retry
+import pyotp
+
+client = TestClient(app)
+
+
+class Query:
+    def __init__(self, result):
+        self._result = result
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def join(self, *args, **kwargs):
+        return self
+
+    def limit(self, n):
+        return self
+
+    def with_for_update(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        if self._result is None:
+            return []
+        if isinstance(self._result, list):
+            return self._result
+        return [self._result]
+
+    def one_or_none(self):
+        if isinstance(self._result, list):
+            return self._result[0] if self._result else None
+        return self._result
+
+    def first(self):
+        return self.one_or_none()
+
+    def one(self):
+        result = self.one_or_none()
+        if result is None:
+            raise LookupError("no row")
+        return result
+
+
+class LifecycleDB:
+    def __init__(self, repo, run, gate, device):
+        self.repo = repo
+        self.run = run
+        self.gate = gate
+        self.device = device
+        self.added = []
+
+    def query(self, *models):
+        if models and models[0] is Repository:
+            return Query(self.repo)
+        if len(models) == 2 and models[0] is ApprovalGate:
+            return Query([(self.gate, self.run)] if self.gate else [])
+        if models and models[0] is SandboxRun:
+            return Query(self.run)
+        if models and models[0] is ApprovalGate:
+            return Query(self.gate)
+        if models and models[0] is Device:
+            return Query(self.device)
+        return Query(None)
+
+    def add(self, obj):
+        self.added.append(obj)
+        if isinstance(obj, SandboxRun) and obj.id is None:
+            obj.id = 421
+        if isinstance(obj, ApprovalGate) and obj.id is None:
+            obj.id = 1
+            self.gate = obj
+
+    def commit(self):
+        return None
+
+    def refresh(self, obj):
+        if getattr(obj, "id", None) is None:
+            obj.id = 421
+
+
+def test_create_run_returns_pending_provision_and_enqueues(monkeypatch):
+    delayed = []
+
+    class Result:
+        id = "clone-task"
+
+    repo = Repository(
+        full_name="mahnoor-sardar/AutoPatch-Engine",
+        installation_id=1,
+        default_branch="main",
+    )
+    db = LifecycleDB(repo, None, None, None)
+    monkeypatch.setattr(
+        "app.routers.sandbox.clone_and_index.delay",
+        lambda run_id: delayed.append(("clone", run_id)) or Result(),
+    )
+    monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        response = client.post(
+            "/v1/sandbox/runs",
+            headers={"X-API-Key": "dev-local-key"},
+            json={"repo": "mahnoor-sardar/AutoPatch-Engine", "ref": "main"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["pipeline_stage"] == "provision"
+        assert body["approval_gate"] == SANDBOX_PROVISION_GATE
+        assert body["approval_status"] == "pending"
+        assert delayed == [("clone", 421)]
+        assert db.gate is not None
+        assert db.gate.status == "pending"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_approve_marks_gate_approved_and_enqueues(monkeypatch):
+    delayed = []
+    secret = new_secret()
+    run = SandboxRun(id=421, status="queued", repo="a/b", ref="main")
+    gate = ApprovalGate(
+        id=1,
+        run_id=421,
+        gate=SANDBOX_PROVISION_GATE,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
+    db = LifecycleDB(None, run, gate, device)
+    monkeypatch.setattr(
+        "app.routers.sandbox.clone_and_index.delay",
+        lambda run_id: delayed.append(run_id) or type("R", (), {"id": "t"})(),
+    )
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        code = pyotp.TOTP(secret).now()
+        response = client.post(
+            "/v1/sandbox/runs/421/approval",
+            headers={"X-API-Key": "dev-local-key"},
+            json={"device_id": "dev-1", "otp_code": code},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "approved"
+        assert gate.status == "approved"
+        assert delayed == [421]
+        assert gate.status == "approved"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_reject_stops_run_and_hides_pending(monkeypatch):
+    delayed = []
+    secret = new_secret()
+    run = SandboxRun(id=421, status="queued", repo="a/b", ref="main")
+    gate = ApprovalGate(
+        id=1,
+        run_id=421,
+        gate=SANDBOX_PROVISION_GATE,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
+    db = LifecycleDB(None, run, gate, device)
+    monkeypatch.setattr(
+        "app.routers.sandbox.clone_and_index.delay",
+        lambda run_id: delayed.append(run_id),
+    )
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        code = pyotp.TOTP(secret).now()
+        response = client.post(
+            "/v1/sandbox/runs/421/rejection",
+            headers={"X-API-Key": "dev-local-key"},
+            json={"device_id": "dev-1", "otp_code": code},
+        )
+        assert response.status_code == 200
+        assert run.status == "rejected"
+        assert gate.status == "rejected"
+        assert delayed == []
+        assert run.status == "rejected"
+        assert gate.status == "rejected"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_worker_does_not_fail_rejected_or_expired_gate():
+    class Task:
+        class request:
+            called_directly = True
+
+    run = SandboxRun(id=1, status="rejected", repo="a/b", ref="main")
+    gate = ApprovalGate(
+        run_id=1,
+        gate="sandbox_provision",
+        status="rejected",
+    )
+
+    class DB:
+        def query(self, model):
+            return Query(gate if model is ApprovalGate else run)
+
+        def refresh(self, obj):
+            return None
+
+    assert _require_gate_or_retry(Task(), DB(), run, "sandbox_provision") is None
+
+
+def test_pending_list_excludes_expired_without_recreate(monkeypatch):
+    monkeypatch.setattr("app.services.fcm.send_push_with_timeout", lambda *a, **k: "ok")
+    run = SandboxRun(
+        id=421,
+        status="queued",
+        repo="a/b",
+        ref="main",
+        control_state="active",
+    )
+    gate = ApprovalGate(
+        id=9,
+        run_id=421,
+        gate=SANDBOX_PROVISION_GATE,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    db = LifecycleDB(None, run, gate, None)
+    expired = expire_stale_gates(db, notify=False, recreate=False)
+    assert expired
+    assert gate.status == "expired"
+    assert run.status == "paused"
+    pending = [
+        g for g in [db.gate] if g.status == "pending"
+    ]
+    assert pending == []
+
+
+def test_clone_claim_queued_not_later_stage():
+    from datetime import datetime, timezone
+
+    from app.services.approval import STAGE_CLONE
+    from app.workers.tasks import _claim_clone_stage
+
+    queued = SandboxRun(id=1, status="queued", pipeline_stage="provision")
+    completed = SandboxRun(
+        id=2,
+        status="completed",
+        pipeline_stage=STAGE_CLONE,
+        finished_at=datetime.now(timezone.utc),
+        duration_ms=10,
+    )
+
+    class DBQueued:
+        def query(self, model):
+            return Query(queued)
+
+        def commit(self):
+            return None
+
+    class DBCompleted:
+        def query(self, model):
+            return Query(completed)
+
+        def commit(self):
+            return None
+
+    started = datetime.now(timezone.utc)
+    assert _claim_clone_stage(DBQueued(), queued, started) is True
+    assert queued.status == "running"
+    assert queued.finished_at is None
+    assert _claim_clone_stage(DBCompleted(), completed, started) is False
+    assert completed.status == "completed"

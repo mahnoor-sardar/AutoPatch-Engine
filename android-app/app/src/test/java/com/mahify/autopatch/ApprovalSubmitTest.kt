@@ -98,4 +98,25 @@ class ApprovalSubmitTest {
         assertEquals(165, ApprovalSubmit.runIdForDisplayedRequest(displayed))
         assertEquals("Run #165", ApprovalSubmit.runLabel(displayed.runId))
     }
+
+    @Test
+    fun approvedCardRemovedByRunAndGateNotAllRuns() {
+        val provision = ApprovalRequest(
+            runId = 421,
+            repository = "a/b",
+            gate = "sandbox_provision",
+            expiresAt = null
+        )
+        val patch = ApprovalRequest(
+            runId = 421,
+            repository = "a/b",
+            gate = "patch_review",
+            expiresAt = null
+        )
+        val remaining = listOf(provision, patch).filterNot {
+            ApprovalSubmit.itemKey(it) == ApprovalSubmit.itemKey(provision)
+        }
+        assertEquals(listOf(421), remaining.map { it.runId })
+        assertEquals(listOf("patch_review"), remaining.map { it.gate })
+    }
 }
