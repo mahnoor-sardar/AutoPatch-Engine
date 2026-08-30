@@ -221,3 +221,21 @@ async def github_repositories(installation_id: int):
             for repo in data.get("repositories", [])
         ]
     }
+
+
+@router.get(
+    "/v1/github/connected",
+    dependencies=[Depends(require_api_key)],
+)
+def connected_repositories(db: Session = Depends(get_db)):
+    rows = db.query(Repository).order_by(Repository.full_name).all()
+    return {
+        "repositories": [
+            {
+                "full_name": row.full_name,
+                "default_branch": row.default_branch,
+                "installation_id": row.installation_id,
+            }
+            for row in rows
+        ]
+    }

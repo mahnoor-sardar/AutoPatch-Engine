@@ -1,0 +1,241 @@
+"use client";
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  fetchConnectedRepos,
+  fetchHealth,
+  fetchRecentAudit,
+  fetchRuns,
+} from "@/lib/api";
+import { wsUrl } from "@/lib/config";
+import type {
+  AuditEvent,
+  ConnectedRepository,
+  Health,
+  Run,
+  WsPayload,
+} from "@/lib/types";
+
+type SocketState = "connecting" | "live" | "reconnecting" | "offline";
+
+type LiveContextValue = {
+  health: Health | null;
+  healthError: string | null;
+  runs: Run[];
+  stats: { total: number; successful: number; running: number; failed: number } | null;
+  repos: ConnectedRepository[];
+  events: AuditEvent[];
+  socket: SocketState;
+  loading: boolean;
+  error: string | null;
+  latestTitle: string | null;
+  refresh: () => Promise<void>;
+};
+
+const LiveContext = createContext<LiveContextValue | null>(null);
+
+let ephemeralId = -1;
+
+function mergeRuns(prev: Run[], incoming: Run[]): Run[] {
+  const prevById = new Map(prev.map((run) => [run.id, run]));
+  const merged = incoming.map((run) => ({
+    ...(prevById.get(run.id) || {}),
+    ...run,
+  }));
+  const seen = new Set(incoming.map((run) => run.id));
+  const extras = prev.filter((run) => !seen.has(run.id));
+  return [...merged, ...extras].sort((a, b) => b.id - a.id);
+}
+
+function applyEventToRuns(runs: Run[], event: NonNullable<WsPayload["event"]>): Run[] {
+  if (event.run_id == null) return runs;
+  return runs.map((run) => {
+    if (run.id !== event.run_id) return run;
+    return {
+      ...run,
+      status: event.status ?? run.status,
+      current_diff:
+        event.current_diff !== undefined ? event.current_diff : run.current_diff,
+      pr_url: event.pr_url !== undefined ? event.pr_url : run.pr_url,
+    };
+  });
+}
+
+export function LiveProvider({ children }: { children: React.ReactNode }) {
+  const [health, setHealth] = useState<Health | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [stats, setStats] = useState<LiveContextValue["stats"]>(null);
+  const [repos, setRepos] = useState<ConnectedRepository[]>([]);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [socket, setSocket] = useState<SocketState>("connecting");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [latestTitle, setLatestTitle] = useState<string | null>(null);
+  const delayRef = useRef(1000);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [h, runList, repoList, audit] = await Promise.all([
+        fetchHealth().catch((err: Error) => {
+          setHealthError(err.message);
+          return null;
+        }),
+        fetchRuns(100),
+        fetchConnectedRepos(),
+        fetchRecentAudit(200),
+      ]);
+      if (h) {
+        setHealth(h);
+        setHealthError(null);
+      }
+      setRuns((prev) => mergeRuns(prev, runList.runs || []));
+      setStats(runList.stats || null);
+      setRepos(repoList.repositories || []);
+      setEvents(audit.events || []);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load console data");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const healthTimer = setInterval(() => {
+      fetchHealth()
+        .then((h) => {
+          setHealth(h);
+          setHealthError(null);
+        })
+        .catch((err: Error) => setHealthError(err.message));
+    }, 20000);
+    const auditTimer = setInterval(() => {
+      fetchRecentAudit(200)
+        .then((audit) => setEvents(audit.events || []))
+        .catch(() => undefined);
+    }, 20000);
+    return () => {
+      clearInterval(healthTimer);
+      clearInterval(auditTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let closed = false;
+    let socketRef: WebSocket | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (closed) return;
+      setSocket((prev) => (prev === "offline" ? "reconnecting" : "connecting"));
+      const ws = new WebSocket(wsUrl());
+      socketRef = ws;
+      ws.onopen = () => {
+        delayRef.current = 1000;
+        setSocket("live");
+      };
+      ws.onmessage = (message) => {
+        let payload: WsPayload;
+        try {
+          payload = JSON.parse(message.data);
+        } catch {
+          return;
+        }
+        if (Array.isArray(payload.runs)) {
+          setRuns((prev) => {
+            const next = mergeRuns(prev, payload.runs || []);
+            return payload.event ? applyEventToRuns(next, payload.event) : next;
+          });
+        } else if (payload.event) {
+          setRuns((prev) => applyEventToRuns(prev, payload.event!));
+        }
+        if (payload.event) {
+          const event = payload.event;
+          setLatestTitle(event.title || null);
+          setEvents((prev) => {
+            const next: AuditEvent = {
+              id: ephemeralId,
+              run_id: event.run_id ?? null,
+              action: event.title || event.type || "event",
+              detail: event.body || null,
+              actor: "system",
+              result: "success",
+              created_at: new Date().toISOString(),
+              repository:
+                payload.runs?.find((run) => run.id === event.run_id)?.repo ?? null,
+            };
+            ephemeralId -= 1;
+            return [next, ...prev.filter((item) => item.id !== next.id)].slice(0, 400);
+          });
+        }
+      };
+      ws.onclose = () => {
+        if (closed) return;
+        setSocket("reconnecting");
+        timer = setTimeout(connect, delayRef.current);
+        delayRef.current = Math.min(delayRef.current * 2, 15000);
+      };
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+      socketRef?.close();
+      setSocket("offline");
+    };
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      health,
+      healthError,
+      runs,
+      stats,
+      repos,
+      events,
+      socket,
+      loading,
+      error,
+      latestTitle,
+      refresh,
+    }),
+    [
+      health,
+      healthError,
+      runs,
+      stats,
+      repos,
+      events,
+      socket,
+      loading,
+      error,
+      latestTitle,
+      refresh,
+    ]
+  );
+
+  return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;
+}
+
+export function useLive() {
+  const ctx = useContext(LiveContext);
+  if (!ctx) throw new Error("useLive must be used within LiveProvider");
+  return ctx;
+}
