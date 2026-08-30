@@ -62,7 +62,17 @@ export type WsPayload = {
     status?: string;
     current_diff?: string | null;
     pr_url?: string | null;
+    stream?: "stdout" | "stderr";
+    chunk?: string;
   };
+};
+
+export type AgentLogChunk = {
+  run_id: number;
+  stream: "stdout" | "stderr";
+  chunk: string;
+  source?: string;
+  id?: number;
 };
 
 export type Diagnosis = {

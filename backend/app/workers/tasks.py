@@ -1,4 +1,5 @@
 import logging
+from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from celery.exceptions import MaxRetriesExceededError, Retry
@@ -332,6 +333,7 @@ def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         gate = _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
@@ -351,6 +353,7 @@ def clone_and_index(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
             ref=run.ref,
@@ -570,6 +573,7 @@ def clone_and_index(run_id: int) -> None:
         notify_run_event(db, run, "Run failed", str(exc)[:180])
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()
@@ -583,6 +587,7 @@ def apply_patch_and_verify(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, PATCH_REVIEW_GATE)
@@ -601,6 +606,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
             ref=run.ref,
@@ -623,9 +629,10 @@ def apply_patch_and_verify(run_id: int) -> None:
         sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
         normalize_sandbox_patch_targets(sandbox, run.current_diff)
         try:
-            sandbox.commands.run(
+            e2b_runner.run_sandbox_command(
+                sandbox,
                 "cd /home/user/repo && git apply /tmp/autopatch.diff",
-                timeout=120,
+                120,
             )
             apply_ok = True
             apply_err = ""
@@ -741,6 +748,7 @@ def apply_patch_and_verify(run_id: int) -> None:
         db.commit()
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()
@@ -754,6 +762,7 @@ def open_github_pr(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, MERGE_GATE)
@@ -767,6 +776,7 @@ def open_github_pr(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         branch = f"autopatch/run-{run.id}"
         sandbox, _files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
@@ -778,11 +788,13 @@ def open_github_pr(run_id: int) -> None:
         if run.current_diff:
             sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
             normalize_sandbox_patch_targets(sandbox, run.current_diff)
-            sandbox.commands.run(
+            e2b_runner.run_sandbox_command(
+                sandbox,
                 "cd /home/user/repo && git apply /tmp/autopatch.diff",
-                timeout=120,
+                120,
             )
-        sandbox.commands.run(
+        e2b_runner.run_sandbox_command(
+            sandbox,
             "cd /home/user/repo && "
             "git config user.email autopatch@local && "
             "git config user.name AutoPatch && "
@@ -790,7 +802,7 @@ def open_github_pr(run_id: int) -> None:
             "git add -A && "
             "git commit -m 'fix: verified autopatch' && "
             f"git push origin {branch}",
-            timeout=120,
+            120,
         )
         pr = create_pull_request(
             token=token,
@@ -823,6 +835,7 @@ def open_github_pr(run_id: int) -> None:
         db.commit()
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()

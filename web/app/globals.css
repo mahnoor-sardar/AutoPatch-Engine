@@ -774,6 +774,45 @@ div.step {
   margin-bottom: 0.7rem;
 }
 
+.log-scroller {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.28);
+  padding: 0.45rem 0.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.log-line {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-line.stderr {
+  color: #fca5a5;
+}
+
+.log-line.stdout {
+  color: #d4d4d8;
+}
+
+.log-tag {
+  display: inline-block;
+  min-width: 3.4rem;
+  margin-right: 0.45rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+}
+
+.log-line.stderr .log-tag {
+  color: var(--bad);
+}
+
 .repo-grid {
   display: grid;
   grid-template-columns: 1fr auto;

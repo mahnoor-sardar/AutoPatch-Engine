@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import shlex
 
-from app.services.e2b_runner import COMMAND_TIMEOUT, install_project_dependencies
+from app.services.e2b_runner import COMMAND_TIMEOUT, install_project_dependencies, run_sandbox_command
 
 REPRO_TIMEOUT = COMMAND_TIMEOUT
 
@@ -88,9 +88,7 @@ def _write_file(sandbox, path: str, content: str) -> None:
 
 
 def _run_command(sandbox, command: str, timeout: int):
-    if hasattr(sandbox, "commands"):
-        return sandbox.commands.run(command, timeout=timeout)
-    return sandbox.run(command, timeout=timeout)
+    return run_sandbox_command(sandbox, command, timeout)
 
 
 def run_reproduction_test(

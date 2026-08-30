@@ -12,6 +12,7 @@ from app.services import fcm
 logger = logging.getLogger(__name__)
 
 RUN_CHANNEL = "autopatch:runs"
+MAX_AGENT_LOG_CHUNK = 4096
 
 
 def publish_run_update(payload: dict | None = None) -> None:
@@ -86,5 +87,31 @@ def notify_run_event(
             "status": run.status,
             "current_diff": run.current_diff,
             "pr_url": run.pr_url,
+        }
+    )
+
+
+def publish_agent_log(
+    run_id: int,
+    stream: str,
+    chunk: str,
+    token: str = "",
+) -> None:
+    """Publish sandbox stdout/stderr to RUN_CHANNEL without FCM."""
+    from app.services.e2b_runner import sanitize_log_text
+
+    if stream not in ("stdout", "stderr"):
+        return
+    text = sanitize_log_text(chunk or "", token)
+    if not text:
+        return
+    if len(text) > MAX_AGENT_LOG_CHUNK:
+        text = text[:MAX_AGENT_LOG_CHUNK]
+    publish_run_update(
+        {
+            "type": "agent_log",
+            "run_id": run_id,
+            "stream": stream,
+            "chunk": text,
         }
     )

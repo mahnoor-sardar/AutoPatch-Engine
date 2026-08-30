@@ -17,6 +17,7 @@ import {
 } from "@/lib/api";
 import { wsUrl } from "@/lib/config";
 import type {
+  AgentLogChunk,
   AuditEvent,
   ConnectedRepository,
   Health,
@@ -26,6 +27,10 @@ import type {
 
 type SocketState = "connecting" | "live" | "reconnecting" | "offline";
 
+/** Keep at most 500 chunks / 120k chars per run so a long stream cannot grow forever. */
+export const MAX_AGENT_LOG_CHUNKS = 500;
+export const MAX_AGENT_LOG_CHARS = 120_000;
+
 type LiveContextValue = {
   health: Health | null;
   healthError: string | null;
@@ -33,11 +38,13 @@ type LiveContextValue = {
   stats: { total: number; successful: number; running: number; failed: number } | null;
   repos: ConnectedRepository[];
   events: AuditEvent[];
+  agentLogs: Record<number, AgentLogChunk[]>;
   socket: SocketState;
   loading: boolean;
   error: string | null;
   latestTitle: string | null;
   refresh: () => Promise<void>;
+  mergeAgentLogs: (runId: number, chunks: AgentLogChunk[]) => void;
 };
 
 const LiveContext = createContext<LiveContextValue | null>(null);
@@ -53,6 +60,27 @@ function mergeRuns(prev: Run[], incoming: Run[]): Run[] {
   const seen = new Set(incoming.map((run) => run.id));
   const extras = prev.filter((run) => !seen.has(run.id));
   return [...merged, ...extras].sort((a, b) => b.id - a.id);
+}
+
+function boundLogs(chunks: AgentLogChunk[]): AgentLogChunk[] {
+  let next = chunks.slice(-MAX_AGENT_LOG_CHUNKS);
+  let chars = next.reduce((sum, item) => sum + item.chunk.length, 0);
+  while (next.length > 1 && chars > MAX_AGENT_LOG_CHARS) {
+    chars -= next[0].chunk.length;
+    next = next.slice(1);
+  }
+  return next;
+}
+
+function appendLog(
+  prev: Record<number, AgentLogChunk[]>,
+  chunk: AgentLogChunk
+): Record<number, AgentLogChunk[]> {
+  const existing = prev[chunk.run_id] || [];
+  return {
+    ...prev,
+    [chunk.run_id]: boundLogs([...existing, chunk]),
+  };
 }
 
 function applyEventToRuns(runs: Run[], event: NonNullable<WsPayload["event"]>): Run[] {
@@ -76,6 +104,7 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const [stats, setStats] = useState<LiveContextValue["stats"]>(null);
   const [repos, setRepos] = useState<ConnectedRepository[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [agentLogs, setAgentLogs] = useState<Record<number, AgentLogChunk[]>>({});
   const [socket, setSocket] = useState<SocketState>("connecting");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +147,19 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
     setLoading(false);
   }, [loadOptional]);
 
+  const mergeAgentLogs = useCallback((runId: number, chunks: AgentLogChunk[]) => {
+    if (!chunks.length) return;
+    setAgentLogs((prev) => {
+      if ((prev[runId] || []).length) return prev;
+      const tagged: AgentLogChunk[] = chunks.map((item) => ({
+        ...item,
+        run_id: item.run_id || runId,
+        stream: item.stream === "stderr" ? "stderr" : "stdout",
+      }));
+      return { ...prev, [runId]: boundLogs(tagged) };
+    });
+  }, []);
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -155,6 +197,21 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
         try {
           payload = JSON.parse(message.data);
         } catch {
+          return;
+        }
+        if (payload.event?.type === "agent_log") {
+          const event = payload.event;
+          const runId = event.run_id;
+          const chunk = event.chunk;
+          if (runId != null && chunk) {
+            setAgentLogs((prev) =>
+              appendLog(prev, {
+                run_id: runId,
+                stream: event.stream === "stderr" ? "stderr" : "stdout",
+                chunk,
+              })
+            );
+          }
           return;
         }
         if (Array.isArray(payload.runs)) {
@@ -217,11 +274,13 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
       stats,
       repos,
       events,
+      agentLogs,
       socket,
       loading,
       error,
       latestTitle,
       refresh,
+      mergeAgentLogs,
     }),
     [
       health,
@@ -230,11 +289,13 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
       stats,
       repos,
       events,
+      agentLogs,
       socket,
       loading,
       error,
       latestTitle,
       refresh,
+      mergeAgentLogs,
     ]
   );
 

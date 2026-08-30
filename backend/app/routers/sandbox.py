@@ -9,7 +9,16 @@ from sqlalchemy.orm import Session, noload
 from app.auth import require_api_key
 from app.config import settings
 from app.db import get_db
-from app.models import ApprovalGate, AuditEvent, Device, Repository, SandboxRun, Symbol
+from app.models import (
+    ApprovalGate,
+    AuditEvent,
+    Device,
+    PatchAttempt,
+    ReproductionAttempt,
+    Repository,
+    SandboxRun,
+    Symbol,
+)
 from app.schemas import ApprovalRequest, RunControlRequest, SandboxRunCreate
 from app.services.approval import (
     MERGE_GATE,
@@ -36,6 +45,7 @@ from app.services.audit import (
     log_audit,
     verify_device_authorization,
 )
+from app.services.e2b_runner import sanitize_log_text
 from app.services.events import publish_run_update
 from app.services.providers import get_sandbox_provider
 from app.workers.tasks import apply_patch_and_verify, clone_and_index, open_github_pr
@@ -592,6 +602,69 @@ def get_run_diagnosis(
 
 
 @router.get(
+    "/v1/sandbox/runs/{run_id}/logs",
+    dependencies=[Depends(require_api_key)],
+)
+def get_run_logs(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    _require_run(db, run_id)
+    chunks: list[dict] = []
+    repros = (
+        db.query(ReproductionAttempt)
+        .filter(ReproductionAttempt.run_id == run_id)
+        .order_by(ReproductionAttempt.id.asc())
+        .all()
+    )
+    patches = (
+        db.query(PatchAttempt)
+        .filter(PatchAttempt.run_id == run_id)
+        .order_by(PatchAttempt.id.asc())
+        .all()
+    )
+    for attempt in repros:
+        if attempt.stdout:
+            chunks.append(
+                {
+                    "stream": "stdout",
+                    "chunk": sanitize_log_text(attempt.stdout),
+                    "source": "reproduction",
+                    "id": attempt.id,
+                }
+            )
+        if attempt.stderr:
+            chunks.append(
+                {
+                    "stream": "stderr",
+                    "chunk": sanitize_log_text(attempt.stderr),
+                    "source": "reproduction",
+                    "id": attempt.id,
+                }
+            )
+    for record in patches:
+        if record.stdout:
+            chunks.append(
+                {
+                    "stream": "stdout",
+                    "chunk": sanitize_log_text(record.stdout),
+                    "source": "verify",
+                    "id": record.id,
+                }
+            )
+        if record.stderr:
+            chunks.append(
+                {
+                    "stream": "stderr",
+                    "chunk": sanitize_log_text(record.stderr),
+                    "source": "verify",
+                    "id": record.id,
+                }
+            )
+    return {"chunks": chunks}
+
+
+@router.get(
     "/v1/sandbox/runs/{run_id}/audit",
     dependencies=[Depends(require_api_key)],
 )
@@ -780,6 +853,9 @@ async def runs_socket(websocket: WebSocket):
                     event = json.loads(raw)
                 except (TypeError, json.JSONDecodeError):
                     event = None
-            await send_snapshot(event)
+            if isinstance(event, dict) and event.get("type") == "agent_log":
+                await websocket.send_json({"event": event})
+            else:
+                await send_snapshot(event)
     except WebSocketDisconnect:
         return

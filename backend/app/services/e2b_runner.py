@@ -1,4 +1,5 @@
-import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 import logging
 import re
 import shlex
@@ -17,28 +18,99 @@ MAX_FILES = 200
 
 logger = logging.getLogger(__name__)
 
+_agent_log_run_id: ContextVar[int | None] = ContextVar("agent_log_run_id", default=None)
+_agent_log_token: ContextVar[str] = ContextVar("agent_log_token", default="")
 
-def _sanitize_error(text: str, token: str) -> str:
+_SECRET_ASSIGN = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|secret|password|authorization|bearer)"
+    r"([=:\s]+)(\S+)"
+)
+
+
+def sanitize_log_text(text: str, token: str = "") -> str:
+    if not text:
+        return ""
     if token:
         text = text.replace(token, "[REDACTED]")
-
-    text = re.sub(
-        r"ghs_[A-Za-z0-9_]+",
-        "[REDACTED_GITHUB_TOKEN]",
-        text,
-    )
+    text = re.sub(r"ghs_[A-Za-z0-9_]+", "[REDACTED_GITHUB_TOKEN]", text)
+    text = re.sub(r"ghp_[A-Za-z0-9]+", "[REDACTED_GITHUB_TOKEN]", text)
+    text = re.sub(r"github_pat_[A-Za-z0-9_]+", "[REDACTED_GITHUB_TOKEN]", text)
     text = re.sub(
         r"https://x-access-token:[^@\s]+@github\.com/",
         "https://github.com/",
         text,
     )
+    text = _SECRET_ASSIGN.sub(r"\1\2[REDACTED]", text)
     return text
 
 
-def _run(sandbox, command: str, timeout: int):
-    if hasattr(sandbox, "commands"):
-        return sandbox.commands.run(command, timeout=timeout)
-    return sandbox.run(command, timeout=timeout)
+def _sanitize_error(text: str, token: str) -> str:
+    return sanitize_log_text(text, token)
+
+
+@contextmanager
+def agent_log_scope(run_id: int, token: str = ""):
+    rid = _agent_log_run_id.set(run_id)
+    tok = _agent_log_token.set(token or "")
+    try:
+        yield
+    finally:
+        _agent_log_run_id.reset(rid)
+        _agent_log_token.reset(tok)
+
+
+def _emit_agent_log(stream: str, chunk: str) -> None:
+    run_id = _agent_log_run_id.get()
+    if run_id is None or not chunk:
+        return
+    from app.services.events import publish_agent_log
+
+    publish_agent_log(run_id, stream, chunk, token=_agent_log_token.get() or "")
+
+
+def _run(sandbox, command: str, timeout: int, on_stdout=None, on_stderr=None):
+    streamed = False
+
+    def _stdout(data):
+        nonlocal streamed
+        streamed = True
+        text = data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
+        if on_stdout:
+            on_stdout(text)
+        _emit_agent_log("stdout", text)
+
+    def _stderr(data):
+        nonlocal streamed
+        streamed = True
+        text = data.decode("utf-8", "replace") if isinstance(data, bytes) else str(data)
+        if on_stderr:
+            on_stderr(text)
+        _emit_agent_log("stderr", text)
+
+    if hasattr(sandbox, "commands") and sandbox.commands is not None:
+        runner = sandbox.commands.run
+    elif hasattr(sandbox, "run"):
+        runner = sandbox.run
+    else:
+        raise AttributeError("sandbox has no command runner")
+    try:
+        result = runner(
+            command,
+            timeout=timeout,
+            on_stdout=_stdout,
+            on_stderr=_stderr,
+        )
+    except TypeError:
+        result = runner(command, timeout=timeout)
+        streamed = False
+    if not streamed:
+        _emit_agent_log("stdout", getattr(result, "stdout", None) or "")
+        _emit_agent_log("stderr", getattr(result, "stderr", None) or "")
+    return result
+
+
+def run_sandbox_command(sandbox, command: str, timeout: int, on_stdout=None, on_stderr=None):
+    return _run(sandbox, command, timeout, on_stdout=on_stdout, on_stderr=on_stderr)
 
 
 def _read(sandbox, path: str) -> str:

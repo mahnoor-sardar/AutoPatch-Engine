@@ -1,5 +1,6 @@
 import { API_BASE, API_DISPLAY, authHeaders } from "./config";
 import type {
+  AgentLogChunk,
   AuditEvent,
   ConnectedRepository,
   Diagnosis,
@@ -67,6 +68,10 @@ export function fetchRecentAudit(limit = 200) {
 
 export function fetchDiagnosis(id: number) {
   return getJson<Diagnosis>(`/v1/sandbox/runs/${id}/diagnosis`);
+}
+
+export function fetchRunLogs(id: number) {
+  return getJson<{ chunks: AgentLogChunk[] }>(`/v1/sandbox/runs/${id}/logs`);
 }
 
 export function fetchConnectedRepos() {

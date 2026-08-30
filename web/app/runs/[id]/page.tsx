@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { fetchDiagnosis, fetchRun, fetchRunAudit } from "@/lib/api";
+import { fetchDiagnosis, fetchRun, fetchRunAudit, fetchRunLogs } from "@/lib/api";
 import { IncidentSummary } from "@/components/diagnosis/IncidentSummary";
 import { EmptyState, ErrorState, Skeleton } from "@/components/layout/States";
 import { useLive } from "@/components/live/LiveProvider";
+import { AgentLogs } from "@/components/logs/AgentLogs";
 import { Pipeline } from "@/components/pipeline/Pipeline";
 import { ApprovalBanner } from "@/components/status/ApprovalBanner";
 import { StageBadge, StatusBadge } from "@/components/status/StatusBadge";
@@ -15,6 +16,7 @@ import { pipelineSteps } from "@/lib/pipeline";
 import type { AuditEvent, Diagnosis, Run } from "@/lib/types";
 import {
   formatDuration,
+  isActive,
   parseStackTrace,
   relativeTime,
   runDurationMs,
@@ -26,11 +28,11 @@ const PatchViewer = dynamic(
   { ssr: false }
 );
 
-const TABS = ["overview", "details", "timeline", "files"] as const;
+const TABS = ["overview", "details", "timeline", "files", "logs"] as const;
 
 export default function RunDetailPage({ params }: { params: { id: string } }) {
   const runId = Number(params.id);
-  const { runs, events: liveEvents } = useLive();
+  const { runs, events: liveEvents, agentLogs, mergeAgentLogs } = useLive();
   const live = runs.find((run) => run.id === runId);
   const [detail, setDetail] = useState<Run | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -49,8 +51,9 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
       fetchRun(runId),
       fetchRunAudit(runId),
       fetchDiagnosis(runId),
+      fetchRunLogs(runId),
     ])
-      .then(([runRes, audit, diag]) => {
+      .then(([runRes, audit, diag, logs]) => {
         if (cancelled) return;
         if (runRes.status === "fulfilled") {
           setDetail(runRes.value);
@@ -68,6 +71,9 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
         if (diag.status === "fulfilled") {
           setDiagnosis(diag.value);
         }
+        if (logs.status === "fulfilled") {
+          mergeAgentLogs(runId, logs.value.chunks || []);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -75,7 +81,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, mergeAgentLogs]);
 
   const run = useMemo(() => {
     if (!live && !detail) return null;
@@ -213,6 +219,10 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
             <Timeline events={events.slice(0, 6)} />
           </div>
           <PatchViewer diff={run.current_diff} attempts={run.patch_attempts} />
+          <AgentLogs
+            chunks={agentLogs[run.id] || []}
+            live={isActive(run)}
+          />
         </>
       ) : null}
 
@@ -228,6 +238,10 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
 
       {tab === "files" ? (
         <PatchViewer diff={run.current_diff} attempts={run.patch_attempts} />
+      ) : null}
+
+      {tab === "logs" ? (
+        <AgentLogs chunks={agentLogs[run.id] || []} live={isActive(run)} />
       ) : null}
     </div>
   );
