@@ -29,6 +29,12 @@ export function activityCategory(event: AuditEvent): ActivityFilter {
   return "pipeline";
 }
 
+export function eventTone(event: AuditEvent): ActivityFilter | "diagnosis" {
+  const action = (event.action || "").toLowerCase();
+  if (action === "diagnosis" || action.includes("diagnos")) return "diagnosis";
+  return activityCategory(event);
+}
+
 export function matchesFilter(event: AuditEvent, filter: ActivityFilter): boolean {
   if (filter === "all") return true;
   return activityCategory(event) === filter;

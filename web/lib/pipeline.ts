@@ -93,7 +93,7 @@ export function pipelineSteps(run: Run, events: AuditEvent[] = []): PipelineStep
       reproduce: "Reproduce",
       diagnose: "Diagnose",
       patch: "Patch",
-      review: "Review",
+      review: "Patch Review",
       verify: "Verify",
       merge: "Merge",
       pr: "PR",

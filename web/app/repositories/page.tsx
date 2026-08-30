@@ -24,8 +24,10 @@ export default function RepositoriesPage() {
     }
   }
 
-  if (loading) return <Skeleton rows={5} />;
-  if (error) return <ErrorState message={error} onRetry={() => void refresh()} />;
+  if (error && runs.length === 0 && repos.length === 0) {
+    return <ErrorState message={error} onRetry={() => void refresh()} />;
+  }
+  if (loading && runs.length === 0 && repos.length === 0) return <Skeleton rows={5} />;
 
   const rows = [...names.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
@@ -50,22 +52,23 @@ export default function RepositoriesPage() {
             const href = `/repositories/${encodeURIComponent(fullName)}`;
             return (
               <Link key={fullName} href={href} className="repo-row">
-                <div className="run-row-top">
-                  <strong>{name}</strong>
+                <div className="repo-grid">
+                  <div>
+                    <strong>{name}</strong>
+                    <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.82rem" }}>
+                      {owner}
+                      {meta.default_branch ? ` · ${meta.default_branch}` : ""}
+                    </p>
+                  </div>
                   <span className={meta.connected ? "badge ok" : "badge quiet"}>
                     {meta.connected ? "Connected" : "Seen in runs"}
                   </span>
                 </div>
-                <p className="muted" style={{ margin: "0.25rem 0" }}>
-                  {owner} · GitHub
-                  {meta.default_branch ? ` · ${meta.default_branch}` : ""}
-                </p>
-                <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-                  Last activity:{" "}
-                  {relativeTime(lastEvent?.created_at || last?.started_at || last?.finished_at)}
-                  {" · "}
-                  Active runs: {repoRuns.filter(isActive).length}
+                <p className="muted" style={{ margin: "0.55rem 0 0", fontSize: "0.8rem" }}>
+                  Active {repoRuns.filter(isActive).length}
                   {last ? ` · Last run #${last.id}` : ""}
+                  {" · "}
+                  {relativeTime(lastEvent?.created_at || last?.started_at || last?.finished_at)}
                 </p>
               </Link>
             );

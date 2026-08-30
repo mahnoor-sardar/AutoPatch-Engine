@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useLive } from "@/components/live/LiveProvider";
+import { isWaiting } from "@/lib/utils";
 
 const ITEMS = [
   { href: "/", label: "Home" },
@@ -12,10 +13,32 @@ const ITEMS = [
   { href: "/settings", label: "Settings" },
 ];
 
+function headerContext(pathname: string): string {
+  if (pathname === "/") return "Overview";
+  if (pathname === "/runs") return "Runs";
+  const run = pathname.match(/^\/runs\/(\d+)/);
+  if (run) return `Run #${run[1]}`;
+  if (pathname === "/repositories") return "Repositories";
+  if (pathname.startsWith("/repositories/")) {
+    try {
+      return decodeURIComponent(pathname.split("/").slice(2).join("/"));
+    } catch {
+      return "Repository";
+    }
+  }
+  if (pathname === "/activity") return "Activity";
+  if (pathname === "/settings") return "Settings";
+  return "Live incident console";
+}
+
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { socket, latestTitle } = useLive();
+  const { socket, latestTitle, runs } = useLive();
   const live = socket === "live";
+  const waiting = runs.filter(isWaiting).length;
+  const connClass =
+    live ? "conn live" : socket === "reconnecting" ? "conn reconnecting" : "conn";
+  const context = headerContext(pathname);
 
   return (
     <div className="app-shell">
@@ -42,22 +65,31 @@ export function Shell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
-        <p className="side-foot">AI engineering console</p>
+        <p className="side-foot">Incident command center</p>
       </aside>
 
       <div className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">AutoPatch Engine</p>
+            <p className="eyebrow">{context}</p>
             {latestTitle ? (
               <p className="latest-event">{latestTitle}</p>
             ) : (
-              <p className="latest-event muted">Live incident console</p>
+              <p className="latest-event muted">Waiting for the next audit event</p>
             )}
           </div>
-          <div className="conn" aria-live="polite">
-            <span className={live ? "dot live" : "dot off"} />
-            {live ? "Live" : socket === "reconnecting" ? "Reconnecting…" : "Offline"}
+          <div className="header-stats">
+            {waiting > 0 ? <span>{waiting} waiting</span> : null}
+            <div className={connClass} aria-live="polite">
+              <span className={live ? "dot live" : "dot off"} />
+              {live
+                ? "Live"
+                : socket === "reconnecting"
+                  ? "Reconnecting…"
+                  : socket === "connecting"
+                    ? "Connecting…"
+                    : "Offline"}
+            </div>
           </div>
         </header>
         <main className="main">{children}</main>

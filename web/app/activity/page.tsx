@@ -16,15 +16,19 @@ const FILTERS: ActivityFilter[] = [
 ];
 
 export default function ActivityPage() {
-  const { events, loading, error, refresh } = useLive();
+  const { events, loading, error, refresh, socket } = useLive();
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const filtered = useMemo(
     () => events.filter((event) => matchesFilter(event, filter)),
     [events, filter]
   );
 
-  if (loading) return <Skeleton rows={8} />;
-  if (error) return <ErrorState message={error} onRetry={() => void refresh()} />;
+  if (error && events.length === 0 && socket === "offline") {
+    return <ErrorState message={error} onRetry={() => void refresh()} />;
+  }
+  if (loading && events.length === 0 && socket === "connecting") {
+    return <Skeleton rows={8} />;
+  }
 
   return (
     <div>
@@ -45,7 +49,7 @@ export default function ActivityPage() {
         ))}
       </div>
       {filtered.length ? (
-        <div className="list">
+        <div className="stream">
           {filtered.map((event) => (
             <ActivityItem key={event.id} event={event} />
           ))}

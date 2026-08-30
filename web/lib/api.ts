@@ -1,4 +1,4 @@
-import { API_BASE, authHeaders } from "./config";
+import { API_BASE, API_DISPLAY, authHeaders } from "./config";
 import type {
   AuditEvent,
   ConnectedRepository,
@@ -8,24 +8,45 @@ import type {
   RunListResponse,
 } from "./types";
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: authHeaders(),
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    if (response.status === 401) {
+const FETCH_TIMEOUT_MS = 10000;
+
+async function getJson<T>(path: string, withAuth = true): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      headers: withAuth ? authHeaders() : undefined,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error(
+          "Unauthorized. Set NEXT_PUBLIC_API_KEY to the same value as the backend API key."
+        );
+      }
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<T>;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
       throw new Error(
-        "Unauthorized. Set NEXT_PUBLIC_API_KEY to the same value as the backend API key."
+        `The API at ${API_DISPLAY} did not respond. Confirm the backend is running.`
       );
     }
-    throw new Error(`${response.status} ${response.statusText}`);
+    if (err instanceof TypeError) {
+      throw new Error(
+        `Could not reach ${API_BASE}${path}. Check that the backend is running and allows this origin.`
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.json() as Promise<T>;
 }
 
 export function fetchHealth() {
-  return getJson<Health>("/health");
+  return getJson<Health>("/health", false);
 }
 
 export function fetchRuns(limit = 100) {

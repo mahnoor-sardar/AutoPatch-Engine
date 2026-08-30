@@ -82,56 +82,52 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const [latestTitle, setLatestTitle] = useState<string | null>(null);
   const delayRef = useRef(1000);
 
+  const loadOptional = useCallback(async () => {
+    const [h, repoList, audit] = await Promise.allSettled([
+      fetchHealth(),
+      fetchConnectedRepos(),
+      fetchRecentAudit(200),
+    ]);
+    if (h.status === "fulfilled") {
+      setHealth(h.value);
+      setHealthError(null);
+    } else {
+      setHealthError(
+        h.reason instanceof Error ? h.reason.message : "Health check failed"
+      );
+    }
+    if (repoList.status === "fulfilled") {
+      setRepos(repoList.value.repositories || []);
+    }
+    if (audit.status === "fulfilled") {
+      setEvents(audit.value.events || []);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
+    setError(null);
     try {
-      const [h, runList, repoList, audit] = await Promise.all([
-        fetchHealth().catch((err: Error) => {
-          setHealthError(err.message);
-          return null;
-        }),
-        fetchRuns(100),
-        fetchConnectedRepos(),
-        fetchRecentAudit(200),
-      ]);
-      if (h) {
-        setHealth(h);
-        setHealthError(null);
-      }
+      const runList = await fetchRuns(100);
       setRuns((prev) => mergeRuns(prev, runList.runs || []));
       setStats(runList.stats || null);
-      setRepos(repoList.repositories || []);
-      setEvents(audit.events || []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load console data");
-    } finally {
-      setLoading(false);
     }
-  }, []);
+    await loadOptional();
+    setLoading(false);
+  }, [loadOptional]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
-    const healthTimer = setInterval(() => {
-      fetchHealth()
-        .then((h) => {
-          setHealth(h);
-          setHealthError(null);
-        })
-        .catch((err: Error) => setHealthError(err.message));
+    const timer = setInterval(() => {
+      void loadOptional();
     }, 20000);
-    const auditTimer = setInterval(() => {
-      fetchRecentAudit(200)
-        .then((audit) => setEvents(audit.events || []))
-        .catch(() => undefined);
-    }, 20000);
-    return () => {
-      clearInterval(healthTimer);
-      clearInterval(auditTimer);
-    };
-  }, []);
+    return () => clearInterval(timer);
+  }, [loadOptional]);
 
   useEffect(() => {
     let closed = false;
@@ -140,7 +136,14 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
 
     const connect = () => {
       if (closed) return;
-      setSocket((prev) => (prev === "offline" ? "reconnecting" : "connecting"));
+      if (
+        socketRef &&
+        (socketRef.readyState === WebSocket.OPEN ||
+          socketRef.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+      setSocket((prev) => (prev === "live" ? "live" : "connecting"));
       const ws = new WebSocket(wsUrl());
       socketRef = ws;
       ws.onopen = () => {
@@ -178,18 +181,19 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
                 payload.runs?.find((run) => run.id === event.run_id)?.repo ?? null,
             };
             ephemeralId -= 1;
-            return [next, ...prev.filter((item) => item.id !== next.id)].slice(0, 400);
+            return [next, ...prev.filter((item) => item.id !== next.id)].slice(
+              0,
+              400
+            );
           });
         }
       };
       ws.onclose = () => {
         if (closed) return;
+        socketRef = null;
         setSocket("reconnecting");
         timer = setTimeout(connect, delayRef.current);
         delayRef.current = Math.min(delayRef.current * 2, 15000);
-      };
-      ws.onerror = () => {
-        ws.close();
       };
     };
 
@@ -197,8 +201,11 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
-      socketRef?.close();
-      setSocket("offline");
+      const current = socketRef;
+      socketRef = null;
+      if (current && current.readyState < WebSocket.CLOSING) {
+        current.close();
+      }
     };
   }, []);
 

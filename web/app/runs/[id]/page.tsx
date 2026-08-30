@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { fetchDiagnosis, fetchRun, fetchRunAudit } from "@/lib/api";
 import { IncidentSummary } from "@/components/diagnosis/IncidentSummary";
 import { EmptyState, ErrorState, Skeleton } from "@/components/layout/States";
 import { useLive } from "@/components/live/LiveProvider";
-import { PatchViewer } from "@/components/patch/PatchViewer";
 import { Pipeline } from "@/components/pipeline/Pipeline";
 import { ApprovalBanner } from "@/components/status/ApprovalBanner";
 import { StageBadge, StatusBadge } from "@/components/status/StatusBadge";
@@ -21,11 +21,16 @@ import {
   statusLabel,
 } from "@/lib/utils";
 
+const PatchViewer = dynamic(
+  () => import("@/components/patch/PatchViewer").then((mod) => mod.PatchViewer),
+  { ssr: false }
+);
+
 const TABS = ["overview", "details", "timeline", "files"] as const;
 
 export default function RunDetailPage({ params }: { params: { id: string } }) {
   const runId = Number(params.id);
-  const { runs } = useLive();
+  const { runs, events: liveEvents } = useLive();
   const live = runs.find((run) => run.id === runId);
   const [detail, setDetail] = useState<Run | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -40,16 +45,29 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchRun(runId), fetchRunAudit(runId), fetchDiagnosis(runId)])
-      .then(([run, audit, diag]) => {
+    Promise.allSettled([
+      fetchRun(runId),
+      fetchRunAudit(runId),
+      fetchDiagnosis(runId),
+    ])
+      .then(([runRes, audit, diag]) => {
         if (cancelled) return;
-        setDetail(run);
-        setEvents(audit.events || []);
-        setDiagnosis(diag);
-        setError(null);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (runRes.status === "fulfilled") {
+          setDetail(runRes.value);
+          setError(null);
+        } else {
+          setError(
+            runRes.reason instanceof Error
+              ? runRes.reason.message
+              : "Failed to load this run"
+          );
+        }
+        if (audit.status === "fulfilled") {
+          setEvents(audit.value.events || []);
+        }
+        if (diag.status === "fulfilled") {
+          setDiagnosis(diag.value);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -57,11 +75,17 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
     return () => {
       cancelled = true;
     };
-  }, [runId, live?.status, live?.pipeline_stage, live?.current_diff, live?.pr_url]);
+  }, [runId]);
 
   const run = useMemo(() => {
     if (!live && !detail) return null;
-    return { ...(detail || {}), ...(live || {}) } as Run;
+    return {
+      ...(detail || {}),
+      ...(live || {}),
+      stack_trace: detail?.stack_trace ?? live?.stack_trace,
+      e2b_sandbox_id: detail?.e2b_sandbox_id ?? live?.e2b_sandbox_id,
+      symbol_count: detail?.symbol_count ?? live?.symbol_count,
+    } as Run;
   }, [live, detail]);
 
   if (loading && !run) return <Skeleton rows={8} />;
@@ -78,35 +102,37 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
   const parsed = parseStackTrace(run.stack_trace);
   const steps = pipelineSteps(run, events);
   const duration = runDurationMs(run);
+  const latest = events[0] || liveEvents.find((event) => event.run_id === run.id);
 
   return (
     <div>
-      <p className="eyebrow">
-        <Link href="/runs">Runs</Link>
-      </p>
-      <h1 className="page-title mono">#{run.id}</h1>
-      <p className="lede">
-        {run.repo}
-        {run.ref ? ` · ${run.ref}` : ""}
-      </p>
+      <div className="command-head">
+        <div>
+          <p className="eyebrow">
+            <Link href="/runs">Runs</Link>
+          </p>
+          <h1 className="page-title mono">#{run.id}</h1>
+          <p className="lede" style={{ marginBottom: 0 }}>
+            {run.repo}
+            {run.ref ? ` · ${run.ref}` : ""}
+          </p>
+        </div>
+        <div className="health-row" style={{ margin: 0 }}>
+          <StatusBadge run={run} />
+          <StageBadge stage={run.pipeline_stage} />
+          {run.pr_url ? (
+            <a href={run.pr_url} target="_blank" rel="noreferrer" className="badge ok">
+              Open PR
+            </a>
+          ) : null}
+        </div>
+      </div>
 
-      <div className="health-row">
-        <span className="status-chip">
-          Status <StatusBadge run={run} />
-        </span>
-        <span className="status-chip">
-          Stage <StageBadge stage={run.pipeline_stage} />
-        </span>
-        <span className="muted">
-          Control {run.control_state ? statusLabel(run.control_state) : "—"}
-        </span>
-        <span className="muted">Duration {formatDuration(duration)}</span>
-        <span className="muted">Attempts {run.patch_attempts ?? 0}</span>
-        {run.pr_url ? (
-          <a href={run.pr_url} target="_blank" rel="noreferrer">
-            Open PR
-          </a>
-        ) : null}
+      <div className="incident-meta" style={{ marginBottom: "0.85rem" }}>
+        <span>Control {run.control_state ? statusLabel(run.control_state) : "—"}</span>
+        <span>Duration {formatDuration(duration)}</span>
+        <span>Attempts {run.patch_attempts ?? 0}</span>
+        {latest ? <span>Latest {relativeTime(latest.created_at)}</span> : null}
       </div>
 
       {run.status === "failed" || run.status === "killed" || run.status === "rejected" ? (
@@ -126,9 +152,7 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
       {run.status === "paused" ? (
         <section className="banner">
           <h2>Paused</h2>
-          <p style={{ marginBottom: 0 }}>
-            Control state is paused. Resume from the Android app.
-          </p>
+          <p style={{ marginBottom: 0 }}>Resume from the Android app.</p>
         </section>
       ) : null}
       {run.status === "running" ? (
@@ -154,41 +178,41 @@ export default function RunDetailPage({ params }: { params: { id: string } }) {
 
       {tab === "overview" ? (
         <>
+          <IncidentSummary
+            parsed={parsed}
+            diagnosis={diagnosis?.diagnosis}
+            error={run.error}
+          />
           <div className="panel">
             <h3>Pipeline</h3>
             <Pipeline steps={steps} />
           </div>
-          <div className="grid-2">
-            <IncidentSummary
-              parsed={parsed}
-              diagnosis={diagnosis?.diagnosis}
-              error={run.error}
-            />
-            <div className="panel">
-              <h3>Latest context</h3>
-              <div className="meta-grid">
-                <div>
-                  <span>Sandbox</span>
-                  {run.e2b_sandbox_id || "—"}
-                </div>
-                <div>
-                  <span>Started</span>
-                  {relativeTime(run.started_at)}
-                </div>
-                <div>
-                  <span>Symbols</span>
-                  {run.symbol_count ?? "—"}
-                </div>
-                <div>
-                  <span>PR</span>
-                  {run.pr_url ? "Opened" : "Not opened"}
-                </div>
+          <div className="panel">
+            <h3>What AutoPatch is doing</h3>
+            <div className="meta-grid">
+              <div>
+                <span>Sandbox</span>
+                {run.e2b_sandbox_id || "—"}
+              </div>
+              <div>
+                <span>Started</span>
+                {relativeTime(run.started_at)}
+              </div>
+              <div>
+                <span>Symbols</span>
+                {run.symbol_count ?? "—"}
+              </div>
+              <div>
+                <span>PR</span>
+                {run.pr_url ? "Opened" : "Not opened"}
               </div>
             </div>
           </div>
-          {run.current_diff ? (
-            <PatchViewer diff={run.current_diff} attempts={run.patch_attempts} />
-          ) : null}
+          <div className="panel">
+            <h3>Timeline</h3>
+            <Timeline events={events.slice(0, 6)} />
+          </div>
+          <PatchViewer diff={run.current_diff} attempts={run.patch_attempts} />
         </>
       ) : null}
 

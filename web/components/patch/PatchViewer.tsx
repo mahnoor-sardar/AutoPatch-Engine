@@ -13,17 +13,15 @@ export function PatchViewer({
   attempts?: number | null;
 }) {
   const stats = diffStats(diff);
-  const attempt =
-    attempts && attempts > 0 ? attempts : diff ? 1 : 0;
+  const attempt = attempts && attempts > 0 ? attempts : diff ? 1 : 0;
   const value = diff || "// No unified diff has been generated for this run yet.";
   return (
-    <div className="panel">
+    <div className="panel diff-shell">
       <h3>Patch attempt #{attempt}</h3>
-      <p className="muted" style={{ marginTop: 0 }}>
-        {diff ? "Generated · unified diff (source files are not reconstructed)" : "Not generated"}
+      <p className="muted" style={{ margin: "0 0 0.7rem" }}>
         {diff
-          ? ` · ${stats.files} file${stats.files === 1 ? "" : "s"} · +${stats.insertions} / −${stats.deletions}`
-          : ""}
+          ? `Unified diff · ${stats.files} file${stats.files === 1 ? "" : "s"} · +${stats.insertions} / −${stats.deletions}`
+          : "Not generated"}
       </p>
       <Monaco
         height="420px"
@@ -35,6 +33,7 @@ export function PatchViewer({
           minimap: { enabled: false },
           scrollBeyondLastLine: false,
           wordWrap: "on",
+          padding: { top: 8 },
         }}
       />
     </div>

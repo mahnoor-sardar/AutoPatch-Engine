@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ActivityItem } from "@/components/activity/ActivityItem";
 import { EmptyState, ErrorState, Skeleton } from "@/components/layout/States";
 import { useLive } from "@/components/live/LiveProvider";
-import { RunRow } from "@/components/runs/RunRow";
+import { IncidentCard } from "@/components/runs/IncidentCard";
 import { isActive, isFailed, isWaiting } from "@/lib/utils";
 
 export default function HomePage() {
@@ -16,32 +16,34 @@ export default function HomePage() {
   const failed = runs.filter(isFailed);
   const operational = Boolean(health?.ok && health.postgres && health.redis);
 
-  if (loading) return <Skeleton rows={6} />;
-  if (error) return <ErrorState message={error} onRetry={() => void refresh()} />;
+  if (error && runs.length === 0) {
+    return <ErrorState message={error} onRetry={() => void refresh()} />;
+  }
+  if (loading && runs.length === 0) return <Skeleton rows={6} />;
 
   return (
     <div>
-      <h1 className="page-title">AUTOPATCH</h1>
-      <p className="lede">AI engineering console</p>
+      <h1 className="page-title">Overview</h1>
+      <p className="lede">What AutoPatch is doing across connected repositories.</p>
       <div className="health-row">
         <div className="health-item">
           <span className={operational ? "dot live" : "dot off"} />
-          System status: {operational ? "All systems operational" : "Degraded"}
+          {operational ? "All systems operational" : "System degraded"}
         </div>
         <div className="health-item">
           <span className={socket === "live" ? "dot live" : "dot off"} />
-          WebSocket: {socket === "live" ? "Connected" : socket}
+          WebSocket {socket === "live" ? "connected" : socket}
         </div>
         {healthError ? <span className="muted">{healthError}</span> : null}
       </div>
 
       <div className="metrics">
         <div className="metric">
-          <span>Active runs</span>
+          <span>Active</span>
           <strong>{active.length}</strong>
         </div>
         <div className="metric">
-          <span>Awaiting approval</span>
+          <span>Awaiting</span>
           <strong>{waiting.length}</strong>
         </div>
         <div className="metric">
@@ -56,12 +58,12 @@ export default function HomePage() {
 
       <div className="section-head">
         <h2>Active incidents</h2>
-        <Link href="/runs">View all runs</Link>
+        <Link href="/runs">All runs</Link>
       </div>
       {active.length ? (
         <div className="list">
           {active.slice(0, 8).map((run) => (
-            <RunRow key={run.id} run={run} />
+            <IncidentCard key={run.id} run={run} events={events} />
           ))}
         </div>
       ) : (
@@ -71,12 +73,12 @@ export default function HomePage() {
         />
       )}
 
-      <div className="section-head" style={{ marginTop: "1.5rem" }}>
+      <div className="section-head" style={{ marginTop: "1.35rem" }}>
         <h2>Recent activity</h2>
-        <Link href="/activity">View all activity</Link>
+        <Link href="/activity">Full stream</Link>
       </div>
       {events.length ? (
-        <div className="list">
+        <div className="stream">
           {events.slice(0, 8).map((event) => (
             <ActivityItem key={event.id} event={event} compact />
           ))}

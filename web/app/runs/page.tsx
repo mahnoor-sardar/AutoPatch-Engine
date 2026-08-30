@@ -3,13 +3,13 @@
 import { useMemo, useState } from "react";
 import { EmptyState, ErrorState, Skeleton } from "@/components/layout/States";
 import { useLive } from "@/components/live/LiveProvider";
-import { RunRow } from "@/components/runs/RunRow";
+import { IncidentCard } from "@/components/runs/IncidentCard";
 import { isActive, isFailed, isWaiting } from "@/lib/utils";
 
 const FILTERS = ["all", "active", "waiting", "completed", "failed"] as const;
 
 export default function RunsPage() {
-  const { runs, loading, error, refresh } = useLive();
+  const { runs, events, loading, error, refresh } = useLive();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
   const [q, setQ] = useState("");
 
@@ -25,8 +25,10 @@ export default function RunsPage() {
     });
   }, [runs, filter, q]);
 
-  if (loading) return <Skeleton rows={6} />;
-  if (error) return <ErrorState message={error} onRetry={() => void refresh()} />;
+  if (error && runs.length === 0) {
+    return <ErrorState message={error} onRetry={() => void refresh()} />;
+  }
+  if (loading && runs.length === 0) return <Skeleton rows={6} />;
 
   return (
     <div>
@@ -54,7 +56,7 @@ export default function RunsPage() {
       {filtered.length ? (
         <div className="list">
           {filtered.map((run) => (
-            <RunRow key={run.id} run={run} />
+            <IncidentCard key={run.id} run={run} events={events} />
           ))}
         </div>
       ) : (

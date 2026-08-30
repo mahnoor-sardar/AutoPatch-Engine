@@ -30,13 +30,20 @@ export function IncidentSummary({
       </dl>
       {diagnosis ? (
         <>
+          <p className="muted" style={{ margin: "0.7rem 0 0", fontSize: "0.84rem" }}>
+            {open
+              ? null
+              : diagnosis.length > 280
+                ? `${diagnosis.slice(0, 280).trim()}…`
+                : diagnosis}
+          </p>
           <button
             type="button"
             className="btn"
-            style={{ marginTop: "0.85rem" }}
+            style={{ marginTop: "0.7rem" }}
             onClick={() => setOpen((v) => !v)}
           >
-            {open ? "Hide diagnosis" : "View diagnosis"}
+            {open ? "Hide full diagnosis" : "View full diagnosis"}
           </button>
           {open ? <pre className="event-expand">{diagnosis}</pre> : null}
         </>
