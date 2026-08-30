@@ -1,6 +1,8 @@
 """E2B custom template used by AutoPatch sandboxes.
 
 The default E2B base image is Debian 12 but does not include iptables.
+The iptables package also provides ip6tables. Both binaries are required
+so IPv4 and IPv6 OUTPUT can be fail-closed at runtime.
 Security packages are installed at *template build* time as root via the
 SDK apt_install() helper. Runtime sandboxes still default to `user`;
 egress and disk-quota scripts run as root through commands.run(user="root").
@@ -31,6 +33,7 @@ def build_autopatch_template():
         .apt_install(TEMPLATE_PACKAGES)
         .run_cmd(
             "command -v iptables && iptables --version && "
+            "command -v ip6tables && ip6tables --version && "
             "(command -v mkfs.ext4 || command -v mkfs.ext2) && "
             "command -v mount && command -v git && command -v python3",
             user="root",

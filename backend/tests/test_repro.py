@@ -28,6 +28,8 @@ def test_synthesize_python_repro():
     assert "def test_reproduces_calculate_failure" in result.test_source
     assert "ZeroDivisionError" in result.test_source
     assert "calculate()" in result.test_source
+    assert "except expected_exception" in result.test_source
+    assert "except Exception:\n        return" not in result.test_source
 
 
 def test_synthesize_python_repro_uses_parameter_defaults():
@@ -71,7 +73,35 @@ def test_synthesize_python_repro_uses_primitive_annotations():
     assert 'add(0, 0.0, "", False)' in result.test_source
 
 
-def test_synthesize_python_repro_incomplete_for_untyped_required_params():
+def test_synthesize_python_repro_required_untyped_params_use_exception_dummy():
+    location = DiagnosticLocation(
+        path="app/services/math.py",
+        name="calculate",
+        kind="function",
+        start_line=1,
+        confidence="high",
+    )
+    source = """def calculate(x, y):
+    return x / y
+"""
+    result = synthesize_python_repro(
+        location=location,
+        source=source,
+        exception_type="ZeroDivisionError",
+        message="division by zero",
+    )
+    assert "calculate(0, 0)" in result.test_source
+    ns = {}
+    exec(source, ns)
+    try:
+        ns["calculate"](0, 0)
+    except ZeroDivisionError:
+        pass
+    else:
+        raise AssertionError("dummy 0, 0 must still raise ZeroDivisionError")
+
+
+def test_synthesize_python_repro_untyped_typeerror_uses_none():
     location = DiagnosticLocation(
         path="app/services/math.py",
         name="add",
@@ -82,13 +112,36 @@ def test_synthesize_python_repro_incomplete_for_untyped_required_params():
     source = """def add(a, b):
     return a + b
 """
-    with pytest.raises(ValueError, match="incomplete"):
-        synthesize_python_repro(
-            location=location,
-            source=source,
-            exception_type="TypeError",
-            message="unsupported",
-        )
+    result = synthesize_python_repro(
+        location=location,
+        source=source,
+        exception_type="TypeError",
+        message="unsupported operand type(s)",
+    )
+    assert "add(None, None)" in result.test_source
+
+
+def test_synthesize_python_repro_method_skips_self_and_uses_owner():
+    location = DiagnosticLocation(
+        path="app/services/math.py",
+        name="divide",
+        kind="method",
+        start_line=2,
+        confidence="high",
+    )
+    source = """class Math:
+    def divide(self, x, y):
+        return x / y
+"""
+    result = synthesize_python_repro(
+        location=location,
+        source=source,
+        exception_type="ZeroDivisionError",
+        message="division by zero",
+    )
+    assert "from app.services.math import Math" in result.test_source
+    assert "Math.divide(None, 0, 0)" in result.test_source
+    assert "divide()" not in result.test_source.split("try:", 1)[1]
 
 
 def test_synthesize_python_repro_incomplete_for_complex_required_params():
@@ -156,3 +209,27 @@ def test_synthesize_javascript_repro_uses_dummy_args_and_esm():
     assert "undefined, undefined" in result.test_source
     assert "import(" in result.test_source
     assert "node:test" in result.test_source
+    assert "assert.throws" not in result.test_source
+    assert "fn(undefined, undefined)" in result.test_source
+    assert "const expected_exception = Error" not in result.test_source
+
+
+def test_synthesize_javascript_repro_embeds_specific_error_type():
+    location = DiagnosticLocation(
+        path="src/user.js",
+        name="getUser",
+        kind="function",
+        start_line=1,
+        confidence="high",
+    )
+    source = "export function getUser(id) { return id.missing }"
+    result = synthesize_javascript_repro(
+        location=location,
+        source=source,
+        exception_type="TypeError",
+        message="Cannot read properties of undefined",
+    )
+    assert result.test_path.endswith(".mjs")
+    assert "const expected_exception = TypeError;" in result.test_source
+    assert "assert.throws" not in result.test_source
+    assert "fn(undefined)" in result.test_source

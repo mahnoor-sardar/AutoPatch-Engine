@@ -27,7 +27,8 @@ def main() -> int:
         print("apply_egress_filter_ok True")
         print("apply_disk_quota_ok True")
         identity = session.run(
-            "id; /usr/sbin/iptables --version; command -v git; command -v python3",
+            "id; /usr/sbin/iptables --version; /usr/sbin/ip6tables --version; "
+            "command -v git; command -v python3",
             timeout=30,
             user="root",
         )
@@ -42,6 +43,15 @@ def main() -> int:
             return 1
         if "ACCEPT" not in text:
             print("FAIL missing ACCEPT rules")
+            return 1
+        ip6_policy = session.run(
+            "ip6tables -L OUTPUT -n -v", timeout=30, user="root"
+        )
+        print("ip6tables_output_chain")
+        print(_out(ip6_policy)[:2500])
+        ip6_text = _out(ip6_policy).upper()
+        if "DROP" not in ip6_text:
+            print("FAIL missing IPv6 OUTPUT DROP")
             return 1
         tools = session.run(
             "command -v git; command -v python3; command -v npm; "

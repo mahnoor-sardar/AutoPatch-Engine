@@ -13,7 +13,7 @@ from app.services.audit import (
 SANDBOX_PROVISION_GATE = "sandbox_provision"
 PATCH_REVIEW_GATE = "patch_review"
 MERGE_GATE = "merge"
-GATE_TTL_SECONDS = 900
+GATE_TTL_SECONDS = 90
 
 STAGE_PROVISION = "provision"
 STAGE_CLONE = "clone"
@@ -42,6 +42,31 @@ def create_pending_gate(
     if notify:
         notify_devices_of_approval_gate(db, run, gate)
     return gate
+
+
+def try_claim_pending_gate(
+    db: Session,
+    gate_id: int,
+    device_id: str,
+) -> ApprovalGate | None:
+    """Atomically move a gate from pending to approved.
+
+    Returns the gate when this caller won the claim. Returns None if the
+    gate is missing or already left pending (replay / lost race).
+    """
+    query = db.query(ApprovalGate).filter(
+        ApprovalGate.id == gate_id,
+        ApprovalGate.status == "pending",
+    )
+    if hasattr(query, "with_for_update"):
+        query = query.with_for_update()
+    locked = query.one_or_none()
+    if locked is None:
+        return None
+    locked.status = "approved"
+    locked.device_id = device_id
+    locked.approved_at = datetime.now(timezone.utc)
+    return locked
 
 
 def create_pending_provision_gate(

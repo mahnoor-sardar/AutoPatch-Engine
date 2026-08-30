@@ -1,8 +1,18 @@
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from app.services.diagnostic import DiagnosticLocation
-from app.services.indexer import ParameterInfo, function_parameters, inspect_function_parameters
+from app.services.indexer import (
+    ParameterInfo,
+    enclosing_class_name,
+    function_parameters,
+    inspect_function_parameters,
+)
+
+
+_JS_ERROR_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GENERIC_JS_ERRORS = frozenset({"Error", "Exception"})
 
 
 _PRIMITIVE_ARGS = {
@@ -19,6 +29,18 @@ class ReproductionTest:
     test_source: str
 
 
+_IMPLICIT_PYTHON_PARAMS = frozenset({"self", "cls"})
+
+
+def _dummy_for_exception(exception_type: str | None, message: str | None) -> str:
+    """Deterministic dummy that tends to reproduce, not hide, the diagnosed error."""
+    kind = (exception_type or "").split(".")[-1]
+    text = f"{kind} {message or ''}".lower()
+    if kind == "ZeroDivisionError" or "division by zero" in text:
+        return "0"
+    return "None"
+
+
 def _normalize_annotation(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -28,22 +50,48 @@ def _normalize_annotation(raw: str | None) -> str | None:
     return text or None
 
 
-def _python_arg_for_param(param: ParameterInfo) -> str | None:
+def _python_arg_for_param(
+    param: ParameterInfo,
+    *,
+    exception_type: str | None,
+    message: str | None,
+) -> str | None:
+    if param.name in _IMPLICIT_PYTHON_PARAMS:
+        return None
     if param.default_is_simple_literal and param.default_source:
         return param.default_source
     annotation = _normalize_annotation(param.annotation)
     if annotation in _PRIMITIVE_ARGS:
         return _PRIMITIVE_ARGS[annotation]
-    return None
+    if annotation:
+        compact = annotation.replace(" ", "")
+        for prim, dummy in _PRIMITIVE_ARGS.items():
+            if compact in {
+                prim,
+                f"Optional[{prim}]",
+                f"{prim}|None",
+                f"None|{prim}",
+            }:
+                return dummy
+        return None
+    return _dummy_for_exception(exception_type, message)
 
 
-def _python_call_args(params: list[ParameterInfo]) -> str:
+def _python_call_args(
+    params: list[ParameterInfo],
+    exception_type: str | None,
+    message: str | None,
+) -> str:
     if not params:
         return ""
     args: list[str] = []
     missing: list[str] = []
     for param in params:
-        value = _python_arg_for_param(param)
+        if param.name in _IMPLICIT_PYTHON_PARAMS:
+            continue
+        value = _python_arg_for_param(
+            param, exception_type=exception_type, message=message
+        )
         if value is None:
             missing.append(param.name)
         else:
@@ -74,11 +122,24 @@ def synthesize_python_repro(
 
     expected_exception = exception_type or "Exception"
     params = inspect_function_parameters(location.path, source, location.name)
-    call_args = _python_call_args(params)
+    call_args = _python_call_args(params, exception_type, message)
+    owner = enclosing_class_name(location.path, source, location.name)
+    has_self = any(param.name == "self" for param in params)
 
     module_path = (
         Path(location.path).with_suffix("").as_posix().replace("/", ".")
     )
+    imported = owner or location.name
+    if owner and has_self:
+        invoked = (
+            f"{owner}.{location.name}(None, {call_args})"
+            if call_args
+            else f"{owner}.{location.name}(None)"
+        )
+    elif owner:
+        invoked = f"{owner}.{location.name}({call_args})"
+    else:
+        invoked = f"{location.name}({call_args})"
 
     test_source = f'''import sys
 from pathlib import Path
@@ -89,22 +150,44 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def test_reproduces_{location.name}_failure():
-    from {module_path} import {location.name}
+    from {module_path} import {imported}
 
     expected_exception = {expected_exception}
 
     try:
-        {location.name}({call_args})
+        {invoked}
     except expected_exception:
         raise
-    except Exception:
-        return
 '''
 
     return ReproductionTest(
         test_path="tests/autopatch_repro_test.py",
         test_source=test_source,
     )
+
+
+def _javascript_expected_error(exception_type: str | None) -> str | None:
+    if not exception_type:
+        return None
+    name = exception_type.strip()
+    if not _JS_ERROR_IDENTIFIER.fullmatch(name):
+        return None
+    if name in _GENERIC_JS_ERRORS:
+        return None
+    if not (name.endswith("Error") or name.endswith("Exception")):
+        return None
+    return name
+
+
+def _javascript_call_args(
+    params: list[str],
+    exception_type: str | None,
+    message: str | None,
+) -> str:
+    """JS missing arguments are represented as undefined (the diagnosed case)."""
+    if not params:
+        return ""
+    return ", ".join("undefined" for _ in params)
 
 
 def synthesize_javascript_repro(
@@ -123,7 +206,7 @@ def synthesize_javascript_repro(
         raise ValueError("Diagnostic location must contain a symbol name")
 
     params = function_parameters(location.path, source, location.name)
-    args = ", ".join("undefined" for _ in params)
+    args = _javascript_call_args(params, exception_type, message)
     rel = location.path.replace("\\", "/")
     suffix = Path(location.path).suffix.lower()
     is_typescript = suffix in {".ts", ".tsx"}
@@ -133,14 +216,20 @@ def synthesize_javascript_repro(
         else "tests/autopatch_repro.test.mjs"
     )
 
-    test_source = f'''import test from "node:test";
-import assert from "node:assert/strict";
+    expected_error = _javascript_expected_error(exception_type)
+    expected_line = (
+        f"const expected_exception = {expected_error};\n\n"
+        if expected_error
+        else ""
+    )
 
-test("reproduces {location.name} failure", async () => {{
+    test_source = f'''import test from "node:test";
+
+{expected_line}test("reproduces {location.name} failure", async () => {{
   const mod = await import("../{rel}");
   const target = mod.{location.name} ?? mod.default ?? mod;
   const fn = typeof target === "function" ? target : target.{location.name};
-  assert.throws(() => fn({args}));
+  fn({args});
 }});
 '''
 

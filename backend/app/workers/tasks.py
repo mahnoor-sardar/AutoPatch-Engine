@@ -39,14 +39,22 @@ from app.services.github_app import (
 )
 from app.services.gemini import diagnose_reproduction
 from app.services.github_pr import create_pull_request
-from app.services.harness import run_full_test_suite, run_reproduction_test
+from app.services.harness import (
+    ADDITIONAL_TESTS_SKIPPED,
+    extra_suite_merge_message,
+    extra_suite_ok,
+    run_full_test_suite,
+    run_reproduction_test,
+)
 from app.services.patcher import LlmNotConfigured, generate_patch
+from app.services.patch_apply import normalize_sandbox_patch_targets
 from app.services.repro import synthesize_repro
 from app.services.stacktrace import parse_stack_trace
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 MAX_PATCH_ATTEMPTS = 5
+VERIFY_OUTPUT_LIMIT = 8000
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected", "killed"})
 WAITING_STATUSES = frozenset(
@@ -276,6 +284,39 @@ def _control_or_stop(db, run: SandboxRun) -> bool:
         db.commit()
         return True
     return False
+
+
+def _clip_verify_output(text: str, limit: int = VERIFY_OUTPUT_LIMIT) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def _verification_failure(*, apply_err: str, suite, full) -> str:
+    if apply_err:
+        return apply_err
+    if suite is not None and not suite.reproduced and suite.exit_code != 0:
+        parts = [f"reproduction test failed (exit {suite.exit_code})"]
+        stdout = _clip_verify_output(suite.stdout)
+        stderr = _clip_verify_output(suite.stderr)
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append(stderr)
+        return "\n".join(parts).strip()
+    if full is not None and full.ran_tests and full.exit_code != 0:
+        parts = [f"full test suite failed (exit {full.exit_code})"]
+        stdout = _clip_verify_output(full.stdout)
+        stderr = _clip_verify_output(full.stderr)
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append(stderr)
+        return "\n".join(parts).strip()
+    if suite is not None and suite.stderr:
+        return suite.stderr
+    return ""
 
 
 def _finish(run: SandboxRun, started, status: str, error: str | None = None):
@@ -580,6 +621,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             db.commit()
             return
         sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
+        normalize_sandbox_patch_targets(sandbox, run.current_diff)
         try:
             sandbox.commands.run(
                 "cd /home/user/repo && git apply /tmp/autopatch.diff",
@@ -598,6 +640,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             .first()
         )
         suite = None
+        full = None
         if apply_ok and latest and latest.test_path and latest.test_source:
             suite = run_reproduction_test(
                 sandbox,
@@ -605,14 +648,21 @@ def apply_patch_and_verify(run_id: int) -> None:
                 latest.test_source,
                 install_dependencies=False,
             )
-            if not suite.reproduced:
+            if suite.reproduced:
+                tests_pass = False
+            elif suite.passed_clean:
                 full = run_full_test_suite(sandbox)
-                tests_pass = full.exit_code == 0
+                tests_pass = extra_suite_ok(full)
             else:
                 tests_pass = False
         else:
             tests_pass = False
 
+        verify_err = _verification_failure(
+            apply_err=apply_err,
+            suite=suite,
+            full=full,
+        )
         record = (
             db.query(PatchAttempt)
             .filter(PatchAttempt.run_id == run.id)
@@ -621,7 +671,16 @@ def apply_patch_and_verify(run_id: int) -> None:
         )
         if record:
             record.status = "applied" if tests_pass else "failed"
-            record.stderr = apply_err or (suite.stderr if suite else None)
+            if tests_pass:
+                record.stderr = apply_err or (suite.stderr if suite else None)
+                if full is not None and not full.ran_tests:
+                    record.stdout = ADDITIONAL_TESTS_SKIPPED
+            else:
+                record.stderr = verify_err or None
+                if full is not None and full.ran_tests and full.exit_code != 0:
+                    record.stdout = _clip_verify_output(full.stdout) or None
+                elif suite is not None and suite.exit_code != 0:
+                    record.stdout = _clip_verify_output(suite.stdout) or None
             db.commit()
 
         if tests_pass:
@@ -630,7 +689,10 @@ def apply_patch_and_verify(run_id: int) -> None:
             _finish(run, started, "awaiting_merge")
             db.commit()
             notify_run_event(
-                db, run, "Merge OTP required", f"{run.repo} is green"
+                db,
+                run,
+                "Merge OTP required",
+                extra_suite_merge_message(run.repo, full),
             )
             return
 
@@ -646,9 +708,9 @@ def apply_patch_and_verify(run_id: int) -> None:
                 path=location_path,
                 source=source,
                 test_source=latest.test_source if latest else "",
-                stderr=apply_err or (suite.stderr if suite else ""),
+                stderr=verify_err,
                 exception_type=None,
-                previous_error=apply_err,
+                previous_error=verify_err,
             )
         except LlmNotConfigured:
             _finish(run, started, "failed", "LLM_API_KEY is not set")
@@ -715,6 +777,7 @@ def open_github_pr(run_id: int) -> None:
         db.commit()
         if run.current_diff:
             sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
+            normalize_sandbox_patch_targets(sandbox, run.current_diff)
             sandbox.commands.run(
                 "cd /home/user/repo && git apply /tmp/autopatch.diff",
                 timeout=120,

@@ -2,9 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 from app.models import ApprovalGate, Device, PushEvent, SandboxRun
 from app.services.approval import (
+    GATE_TTL_SECONDS,
     STAGE_CLONE,
     STAGE_PROVISION,
     apply_gate_expiry,
+    create_pending_gate,
     expire_stale_gates,
     gate_is_expired,
 )
@@ -83,6 +85,45 @@ def test_gate_is_expired_when_ttl_elapsed():
         expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     assert gate_is_expired(gate) is True
+
+
+def test_gate_ttl_matches_90_second_requirement():
+    from app.services.audit import TOKEN_TTL_SECONDS
+
+    assert GATE_TTL_SECONDS == 90
+    assert GATE_TTL_SECONDS == TOKEN_TTL_SECONDS
+
+
+def test_create_pending_gate_sets_90_second_expiry(monkeypatch):
+    monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
+    run = SandboxRun(id=1, status="queued", repo="a/b", ref="main")
+    db = RecordingDB(run, [])
+    before = datetime.now(timezone.utc)
+    gate = create_pending_gate(db, run, "sandbox_provision", notify=False)
+    after = datetime.now(timezone.utc)
+    assert gate.status == "pending"
+    assert gate.expires_at is not None
+    earliest = before + timedelta(seconds=GATE_TTL_SECONDS)
+    latest = after + timedelta(seconds=GATE_TTL_SECONDS)
+    assert earliest <= gate.expires_at <= latest
+
+
+def test_pending_gate_expires_exactly_at_configured_ttl():
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=GATE_TTL_SECONDS)
+    gate = ApprovalGate(
+        run_id=1,
+        gate="sandbox_provision",
+        status="pending",
+        expires_at=expires_at,
+    )
+    assert gate_is_expired(gate, now=now) is False
+    assert gate_is_expired(
+        gate, now=now + timedelta(seconds=GATE_TTL_SECONDS)
+    ) is True
+    assert gate_is_expired(
+        gate, now=now + timedelta(seconds=GATE_TTL_SECONDS + 1)
+    ) is True
 
 
 def test_apply_gate_expiry_pauses_run_and_recreates_gate(monkeypatch):

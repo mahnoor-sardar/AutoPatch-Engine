@@ -176,7 +176,7 @@ def _python_parameter_info(child) -> ParameterInfo | None:
         return None
 
     name = _decode_node(name_node)
-    if not name or name in {"self", "cls"} or name.startswith("*"):
+    if not name or name.startswith("*"):
         return None
 
     type_node = child.child_by_field_name("type")
@@ -232,6 +232,29 @@ def inspect_function_parameters(
                 infos.append(info)
         return infos
     return []
+
+
+def enclosing_class_name(path: str, source: str, function_name: str) -> str | None:
+    """Return the nearest class that owns ``function_name``, if any."""
+    if Path(path).suffix.lower() != ".py":
+        return None
+    parser = _PARSERS.get(".py")
+    if parser is None:
+        return None
+    tree = parser.parse(source.encode("utf-8"))
+    for node in _walk_nodes(tree.root_node):
+        if node.type != "function_definition":
+            continue
+        if _node_name(node) != function_name:
+            continue
+        parent = node.parent
+        while parent is not None:
+            if parent.type == "class_definition":
+                owner = _node_name(parent)
+                return owner or None
+            parent = parent.parent
+        return None
+    return None
 
 
 def _js_parameter_info(child) -> ParameterInfo | None:

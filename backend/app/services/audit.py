@@ -2,12 +2,19 @@ import hashlib
 import hmac
 import time
 
+from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import time
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import AuditEvent, Device
+from app.models import AuditEvent, Device, DeviceAuthReplay
 from app.services import totp
 
 TOKEN_TTL_SECONDS = 90
+AUTH_REPLAY_TTL_SECONDS = 120
 
 
 def verify_device_authorization(
@@ -35,6 +42,73 @@ def verify_device_authorization(
         return hmac.compare_digest(expected, approval_token)
 
     return False
+
+
+def _auth_fingerprint(
+    device: Device,
+    payload: str,
+    otp_code: str | None,
+    approval_token: str | None,
+) -> str | None:
+    secret = (device.totp_secret or "").encode("utf-8")
+    if not secret:
+        return None
+    if otp_code:
+        material = f"{payload}|otp|{otp_code}".encode("utf-8")
+    elif approval_token:
+        material = f"{payload}|tok|{approval_token}".encode("utf-8")
+    else:
+        return None
+    return hmac.new(secret, material, hashlib.sha256).hexdigest()
+
+
+def consume_device_authorization(
+    db: Session,
+    device: Device,
+    payload: str,
+    otp_code: str | None,
+    approval_token: str | None = None,
+) -> bool:
+    """Record a one-time use of this OTP/token for this action.
+
+    Returns False if the same credential was already used for the same
+    action_key (payload). Does not store the raw OTP.
+    """
+    digest = _auth_fingerprint(device, payload, otp_code, approval_token)
+    if digest is None:
+        return False
+    action_key = payload[:256]
+    query = db.query(DeviceAuthReplay).filter(
+        DeviceAuthReplay.device_id == device.device_id,
+        DeviceAuthReplay.action_key == action_key,
+        DeviceAuthReplay.credential_hash == digest,
+    )
+    if hasattr(query, "with_for_update"):
+        query = query.with_for_update()
+    existing = query.one_or_none()
+    if existing is not None:
+        created = existing.created_at or datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - created
+        if age < timedelta(seconds=AUTH_REPLAY_TTL_SECONDS):
+            return False
+        db.delete(existing)
+    db.add(
+        DeviceAuthReplay(
+            device_id=device.device_id,
+            action_key=action_key,
+            credential_hash=digest,
+        )
+    )
+    flush = getattr(db, "flush", None)
+    if flush is None:
+        return True
+    try:
+        flush()
+    except IntegrityError:
+        return False
+    return True
 
 
 def make_approval_token(secret: str, payload: str, token_ts: int) -> str:

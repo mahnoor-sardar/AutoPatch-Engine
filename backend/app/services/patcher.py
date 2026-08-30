@@ -12,6 +12,24 @@ def _litellm_chat_model(model: str) -> str:
     return f"gemini/{name}"
 
 
+def _extract_unified_diff(content: str) -> str:
+    text = (content or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.lstrip()
+    if text.startswith("```"):
+        _fence, sep, rest = text.partition("\n")
+        if not sep:
+            raise ValueError("model did not return a unified diff")
+        text = rest
+        closing = text.rfind("\n```")
+        if closing != -1:
+            text = text[:closing]
+        elif text.endswith("```"):
+            text = text[:-3]
+    if "diff --git" not in text and not text.lstrip().startswith("---"):
+        raise ValueError("model did not return a unified diff")
+    return text.strip("\n") + "\n"
+
+
 def generate_patch(
     *,
     path: str,
@@ -37,23 +55,14 @@ def generate_patch(
         f"Current source:\n{source}\n"
     )
 
+    model = _litellm_chat_model(settings.llm_model)
     kwargs: dict = {
-        "model": _litellm_chat_model(settings.llm_model),
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "api_key": settings.llm_api_key,
     }
-    if settings.llm_api_base:
+    if settings.llm_api_base and not model.startswith("gemini/"):
         kwargs["api_base"] = settings.llm_api_base
 
     response = completion(**kwargs)
-    content = response.choices[0].message.content or ""
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.startswith("diff"):
-            pass
-        else:
-            content = content.split("\n", 1)[-1]
-    if "diff --git" not in content and not content.startswith("---"):
-        raise ValueError("model did not return a unified diff")
-    return content
+    return _extract_unified_diff(response.choices[0].message.content or "")

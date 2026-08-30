@@ -118,6 +118,34 @@ if [ -n "$GITHUB_V4" ]; then
     printf '%s\\n' "$END"
   }} >> "$HOSTS"
 fi
+IP6TABLES=/usr/sbin/ip6tables
+if [ ! -x "$IP6TABLES" ]; then
+  IP6TABLES="$(command -v ip6tables || true)"
+fi
+if [ -z "$IP6TABLES" ]; then
+  echo "ip6tables is required for sandbox IPv6 egress filtering" >&2
+  exit 1
+fi
+"$IP6TABLES" -F OUTPUT
+"$IP6TABLES" -P OUTPUT DROP
+"$IP6TABLES" -A OUTPUT -o lo -j ACCEPT
+"$IP6TABLES" -A OUTPUT -p udp --dport 53 -j ACCEPT
+"$IP6TABLES" -A OUTPUT -p tcp --dport 53 -j ACCEPT
+if "$IP6TABLES" -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT; then
+  true
+else
+  "$IP6TABLES" -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+fi
+for host in {hosts}; do
+  if [ "$host" = github.com ]; then
+    continue
+  fi
+  getent ahosts "$host" 2>/dev/null | awk '{{print $1}}' | sort -u | while read -r ip; do
+    case "$ip" in
+      *:*) "$IP6TABLES" -A OUTPUT -d "$ip" -j ACCEPT ;;
+    esac
+  done
+done
 """
 
 
@@ -125,7 +153,7 @@ PRIVILEGED_USER = "root"
 
 
 def refresh_egress_allowlist(session: "SandboxSession") -> None:
-    """Rebuild OUTPUT DROP + dest ACCEPTs and pin github.com to the same IPv4 snapshot."""
+    """Rebuild IPv4/IPv6 OUTPUT DROP + dest ACCEPTs; pin github.com to IPv4 only."""
     session.run(_egress_filter_script(), timeout=COMMAND_TIMEOUT, user=PRIVILEGED_USER)
 
 

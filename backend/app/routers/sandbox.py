@@ -26,11 +26,13 @@ from app.services.approval import (
     create_pending_provision_gate,
     expire_stale_gates,
     gate_is_expired,
+    try_claim_pending_gate,
 )
 from app.services.audit import (
     ACTOR_ANDROID,
     RESULT_REJECTED,
     RESULT_SUCCESS,
+    consume_device_authorization,
     log_audit,
     verify_device_authorization,
 )
@@ -115,10 +117,21 @@ def serialize_runs(runs: list[SandboxRun]) -> dict:
             {
                 "id": run.id,
                 "repo": run.repo,
+                "ref": run.ref,
                 "status": run.status,
                 "current_diff": run.current_diff,
                 "pr_url": run.pr_url,
                 "control_state": run.control_state,
+                "pipeline_stage": run.pipeline_stage,
+                "error": run.error,
+                "patch_attempts": run.patch_attempts,
+                "duration_ms": run.duration_ms,
+                "started_at": (
+                    run.started_at.isoformat() if run.started_at else None
+                ),
+                "finished_at": (
+                    run.finished_at.isoformat() if run.finished_at else None
+                ),
             }
             for run in runs
         ]
@@ -252,9 +265,6 @@ def approve_sandbox(
             .first()
         )
         if latest is not None and latest.status == "approved":
-            _unpause_on_approve(run)
-            db.commit()
-            _enqueue_for_gate(latest.gate, run.id)
             return {
                 "ok": True,
                 "run_id": run.id,
@@ -274,11 +284,21 @@ def approve_sandbox(
         payload,
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
+    if not consume_device_authorization(
+        db, device, payload, body.otp_code, body.approval_token
+    ):
+        raise HTTPException(status_code=401, detail="invalid otp")
+
+    claimed = try_claim_pending_gate(db, gate.id, device.device_id)
+    if claimed is None:
+        return {
+            "ok": True,
+            "run_id": run.id,
+            "gate": gate.gate,
+            "status": "approved",
+        }
 
     _unpause_on_approve(run)
-    gate.status = "approved"
-    gate.device_id = device.device_id
-    gate.approved_at = datetime.now(timezone.utc)
     if run.status in ("paused",):
         run.status = "queued"
     log_audit(
@@ -286,27 +306,27 @@ def approve_sandbox(
         "approve",
         run.id,
         device.device_id,
-        gate.gate,
+        claimed.gate,
         actor=ACTOR_ANDROID,
         result=RESULT_SUCCESS,
-        event_metadata={"gate": gate.gate},
+        event_metadata={"gate": claimed.gate},
     )
     db.commit()
-    _enqueue_for_gate(gate.gate, run.id)
+    _enqueue_for_gate(claimed.gate, run.id)
     publish_run_update(
         {
             "type": "approval",
             "run_id": run.id,
             "status": run.status,
-            "gate": gate.gate,
-            "gate_status": gate.status,
+            "gate": claimed.gate,
+            "gate_status": claimed.status,
         }
     )
     return {
         "ok": True,
         "run_id": run.id,
-        "gate": gate.gate,
-        "status": gate.status,
+        "gate": claimed.gate,
+        "status": claimed.status,
     }
 
 
@@ -340,6 +360,10 @@ def reject_sandbox(
         body.approval_token,
         body.token_ts,
         payload,
+    ):
+        raise HTTPException(status_code=401, detail="invalid otp")
+    if not consume_device_authorization(
+        db, device, payload, body.otp_code, body.approval_token
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
@@ -383,6 +407,10 @@ def _control(
         None,
         None,
         payload,
+    ):
+        raise HTTPException(status_code=401, detail="invalid otp")
+    if not consume_device_authorization(
+        db, device, payload, body.otp_code, None
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
@@ -524,6 +552,7 @@ def get_run(
         "control_state": run.control_state,
         "pipeline_stage": run.pipeline_stage,
         "patch_attempts": run.patch_attempts,
+        "stack_trace": run.stack_trace,
         "symbol_count": (
             db.query(func.count(Symbol.id))
             .filter(Symbol.run_id == run.id)
@@ -594,6 +623,51 @@ def list_audit(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.get(
+    "/v1/sandbox/audit",
+    dependencies=[Depends(require_api_key)],
+)
+def list_recent_audit(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(limit, 500))
+    events = (
+        db.query(AuditEvent)
+        .order_by(AuditEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+    run_ids = [event.run_id for event in events if event.run_id is not None]
+    runs_by_id: dict[int, SandboxRun] = {}
+    if run_ids:
+        for run in db.query(SandboxRun).filter(SandboxRun.id.in_(run_ids)).all():
+            runs_by_id[run.id] = run
+    return {
+        "events": [
+            {
+                "id": event.id,
+                "run_id": event.run_id,
+                "repository": (
+                    runs_by_id[event.run_id].repo
+                    if event.run_id is not None and event.run_id in runs_by_id
+                    else None
+                ),
+                "action": event.action,
+                "device_id": event.device_id,
+                "detail": event.detail,
+                "actor": event.actor,
+                "result": event.result,
+                "metadata": event.event_metadata,
+                "created_at": (
+                    event.created_at.isoformat() if event.created_at else None
+                ),
+            }
+            for event in events
+        ]
+    }
+
+
+@router.get(
     "/v1/sandbox/runs",
     dependencies=[Depends(require_api_key)],
 )
@@ -655,6 +729,8 @@ def list_runs(
                 "current_diff": run.current_diff,
                 "pr_url": run.pr_url,
                 "control_state": run.control_state,
+                "pipeline_stage": run.pipeline_stage,
+                "patch_attempts": run.patch_attempts,
                 "started_at": (
                     run.started_at.isoformat() if run.started_at else None
                 ),
