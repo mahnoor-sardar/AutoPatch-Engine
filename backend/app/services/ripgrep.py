@@ -1,19 +1,44 @@
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
+class SearchTimedOut(Exception):
+    """Raised when an in-memory search hits its deadline before finishing."""
+
+
 def search_in_files(
-    files: dict[str, str], pattern: str
+    files: dict[str, str],
+    pattern: str,
+    *,
+    max_hits: int | None = None,
+    deadline: float | None = None,
+    max_line_chars: int | None = None,
 ) -> list[tuple[str, int, str]]:
+    """Search an in-memory path→source map. Never reads the filesystem.
+
+    Optional bounds stop the scan between lines. A single ``re.search``
+    call still cannot be preempted; callers should reject unsafe patterns.
+    """
     import re
 
     compiled = re.compile(pattern)
     hits: list[tuple[str, int, str]] = []
     for path, source in files.items():
-        for index, line in enumerate(source.splitlines(), 1):
-            if compiled.search(line):
-                hits.append((path, index, line))
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SearchTimedOut()
+        text = source if isinstance(source, str) else ""
+        for index, line in enumerate(text.splitlines(), 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SearchTimedOut()
+            sample = line
+            if max_line_chars is not None and len(sample) > max_line_chars:
+                sample = sample[:max_line_chars]
+            if compiled.search(sample):
+                hits.append((path, index, sample))
+                if max_hits is not None and len(hits) >= max_hits:
+                    return hits
     return hits
 
 

@@ -27,6 +27,9 @@ def test_serialize_runs_includes_status_and_diff():
     payload = serialize_runs([run])
     assert payload["runs"][0]["id"] == 3
     assert payload["runs"][0]["current_diff"].startswith("diff --git")
+    assert "pipeline_stage" in payload["runs"][0]
+    assert "error" in payload["runs"][0]
+    assert "ref" in payload["runs"][0]
 
 
 def test_websocket_rejects_bad_key():
@@ -116,3 +119,28 @@ def test_log_audit_persists_expire_and_pr():
         assert "pr_opened" in actions
     finally:
         db.close()
+
+
+def test_recent_audit_returns_events_envelope():
+    response = client.get(
+        "/v1/sandbox/audit?limit=5",
+        headers={"X-API-Key": "dev-local-key"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "events" in body
+    assert isinstance(body["events"], list)
+    if body["events"]:
+        assert "action" in body["events"][0]
+        assert "run_id" in body["events"][0]
+
+
+def test_connected_repositories_returns_list():
+    response = client.get(
+        "/v1/github/connected",
+        headers={"X-API-Key": "dev-local-key"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "repositories" in body
+    assert isinstance(body["repositories"], list)

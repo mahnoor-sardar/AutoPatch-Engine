@@ -4,8 +4,13 @@ from fastapi.testclient import TestClient
 
 from app.db import get_db
 from app.main import app
-from app.models import ApprovalGate, Device, Repository, SandboxRun
-from app.services.approval import SANDBOX_PROVISION_GATE, expire_stale_gates
+from app.models import ApprovalGate, Device, DeviceAuthReplay, Repository, SandboxRun
+from app.services.approval import (
+    GATE_TTL_SECONDS,
+    SANDBOX_PROVISION_GATE,
+    expire_stale_gates,
+    try_claim_pending_gate,
+)
 from app.services.totp import new_secret
 from app.workers.tasks import _require_gate_or_retry
 import pyotp
@@ -13,11 +18,25 @@ import pyotp
 client = TestClient(app)
 
 
+def _clause_requires_pending(arg) -> bool:
+    right = getattr(arg, "right", None)
+    left = getattr(arg, "left", None)
+    if getattr(right, "value", None) == "pending":
+        return True
+    if getattr(left, "value", None) == "pending":
+        return True
+    return "pending" in str(arg)
+
+
 class Query:
     def __init__(self, result):
         self._result = result
+        self._pending_only = False
 
     def filter(self, *args, **kwargs):
+        for arg in args:
+            if _clause_requires_pending(arg):
+                self._pending_only = True
         return self
 
     def order_by(self, *args, **kwargs):
@@ -33,16 +52,29 @@ class Query:
         return self
 
     def all(self):
-        if self._result is None:
+        row = self.one_or_none()
+        if row is None:
             return []
-        if isinstance(self._result, list):
-            return self._result
-        return [self._result]
+        if isinstance(row, list):
+            return row
+        return [row]
 
     def one_or_none(self):
+        if self._result is None:
+            return None
         if isinstance(self._result, list):
-            return self._result[0] if self._result else None
-        return self._result
+            row = self._result[0] if self._result else None
+        else:
+            row = self._result
+        if self._pending_only:
+            status = (
+                getattr(row[0], "status", None)
+                if isinstance(row, tuple)
+                else getattr(row, "status", None)
+            )
+            if status != "pending":
+                return None
+        return row
 
     def first(self):
         return self.one_or_none()
@@ -54,6 +86,46 @@ class Query:
         return result
 
 
+def _clause_eq(arg):
+    left = getattr(arg, "left", None)
+    right = getattr(arg, "right", None)
+    name = getattr(left, "key", None)
+    val = getattr(right, "value", None)
+    if val is None:
+        val = getattr(right, "effective_value", None)
+    return name, val
+
+
+class ReplayQuery:
+    def __init__(self, rows):
+        self._rows = rows
+        self._eq = {}
+
+    def filter(self, *args, **kwargs):
+        for arg in args:
+            name, val = _clause_eq(arg)
+            if name is not None:
+                self._eq[name] = val
+        return self
+
+    def with_for_update(self, *args, **kwargs):
+        return self
+
+    def one_or_none(self):
+        for row in self._rows:
+            if self._eq.get("device_id", row.device_id) != row.device_id:
+                continue
+            if self._eq.get("action_key", row.action_key) != row.action_key:
+                continue
+            if (
+                self._eq.get("credential_hash", row.credential_hash)
+                != row.credential_hash
+            ):
+                continue
+            return row
+        return None
+
+
 class LifecycleDB:
     def __init__(self, repo, run, gate, device):
         self.repo = repo
@@ -61,6 +133,7 @@ class LifecycleDB:
         self.gate = gate
         self.device = device
         self.added = []
+        self.replays = []
 
     def query(self, *models):
         if models and models[0] is Repository:
@@ -73,15 +146,27 @@ class LifecycleDB:
             return Query(self.gate)
         if models and models[0] is Device:
             return Query(self.device)
+        if models and models[0] is DeviceAuthReplay:
+            return ReplayQuery(self.replays)
         return Query(None)
 
     def add(self, obj):
         self.added.append(obj)
+        if isinstance(obj, DeviceAuthReplay):
+            self.replays.append(obj)
         if isinstance(obj, SandboxRun) and obj.id is None:
             obj.id = 421
         if isinstance(obj, ApprovalGate) and obj.id is None:
             obj.id = 1
             self.gate = obj
+
+    def flush(self):
+        return None
+
+    def delete(self, obj):
+        if obj in self.replays:
+            self.replays.remove(obj)
+        return None
 
     def commit(self):
         return None
@@ -137,7 +222,7 @@ def test_approve_marks_gate_approved_and_enqueues(monkeypatch):
         run_id=421,
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
     )
     device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
     db = LifecycleDB(None, run, gate, device)
@@ -162,6 +247,91 @@ def test_approve_marks_gate_approved_and_enqueues(monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_replay_of_approved_gate_does_not_enqueue_again(monkeypatch):
+    delayed = []
+    secret = new_secret()
+    run = SandboxRun(id=421, status="queued", repo="a/b", ref="main")
+    gate = ApprovalGate(
+        id=1,
+        run_id=421,
+        gate=SANDBOX_PROVISION_GATE,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
+    )
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
+    db = LifecycleDB(None, run, gate, device)
+    monkeypatch.setattr(
+        "app.routers.sandbox.clone_and_index.delay",
+        lambda run_id: delayed.append(run_id) or type("R", (), {"id": "t"})(),
+    )
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        code = pyotp.TOTP(secret).now()
+        first = client.post(
+            "/v1/sandbox/runs/421/approval",
+            headers={"X-API-Key": "dev-local-key"},
+            json={"device_id": "dev-1", "otp_code": code},
+        )
+        assert first.status_code == 200
+        assert delayed == [421]
+        replay = client.post(
+            "/v1/sandbox/runs/421/approval",
+            headers={"X-API-Key": "dev-local-key"},
+            json={"device_id": "dev-1", "otp_code": code},
+        )
+        assert replay.status_code == 200
+        assert replay.json()["status"] == "approved"
+        assert delayed == [421]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_try_claim_pending_gate_only_succeeds_once():
+    gate = ApprovalGate(
+        id=7,
+        run_id=1,
+        gate=SANDBOX_PROVISION_GATE,
+        status="pending",
+    )
+
+    class ClaimDB:
+        def query(self, model):
+            return Query(gate)
+
+    first = try_claim_pending_gate(ClaimDB(), 7, "dev-1")
+    assert first is gate
+    assert gate.status == "approved"
+    assert gate.device_id == "dev-1"
+    assert gate.approved_at is not None
+    second = try_claim_pending_gate(ClaimDB(), 7, "dev-2")
+    assert second is None
+    assert gate.device_id == "dev-1"
+
+
+def test_worker_still_accepts_approved_gate_after_claim():
+    class Task:
+        class request:
+            called_directly = True
+
+    run = SandboxRun(id=1, status="queued", repo="a/b", ref="main")
+    gate = ApprovalGate(
+        run_id=1,
+        gate="sandbox_provision",
+        status="approved",
+    )
+
+    class DB:
+        def query(self, model):
+            return Query(gate if model is ApprovalGate else run)
+
+        def refresh(self, obj):
+            return None
+
+    claimed = _require_gate_or_retry(Task(), DB(), run, "sandbox_provision")
+    assert claimed is gate
+    assert claimed.status == "approved"
+
+
 def test_reject_stops_run_and_hides_pending(monkeypatch):
     delayed = []
     secret = new_secret()
@@ -171,7 +341,7 @@ def test_reject_stops_run_and_hides_pending(monkeypatch):
         run_id=421,
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
     )
     device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
     db = LifecycleDB(None, run, gate, device)

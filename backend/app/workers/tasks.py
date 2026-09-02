@@ -1,4 +1,5 @@
 import logging
+from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from celery.exceptions import MaxRetriesExceededError, Retry
@@ -7,6 +8,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import (
     ApprovalGate,
+    AuditEvent,
     PatchAttempt,
     ReproductionAttempt,
     Repository,
@@ -39,14 +41,31 @@ from app.services.github_app import (
 )
 from app.services.gemini import diagnose_reproduction
 from app.services.github_pr import create_pull_request
-from app.services.harness import run_full_test_suite, run_reproduction_test
-from app.services.patcher import LlmNotConfigured, generate_patch
+from app.services.harness import (
+    ADDITIONAL_TESTS_SKIPPED,
+    extra_suite_merge_message,
+    extra_suite_ok,
+    run_full_test_suite,
+    run_reproduction_test,
+)
+from app.services.patcher import (
+    LlmNotConfigured,
+    LlmRequestTimeout,
+    LlmTokenBudgetExceeded,
+    PatchGenerationResult,
+    diffs_are_identical,
+    generate_patch,
+)
+from app.services.patch_apply import apply_diff_in_sandbox
 from app.services.repro import synthesize_repro
 from app.services.stacktrace import parse_stack_trace
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 MAX_PATCH_ATTEMPTS = 5
+VERIFY_OUTPUT_LIMIT = 8000
+IDENTICAL_PATCH_ERROR = "identical patch rejected"
+EMPTY_PATCH_ERROR = "empty patch rejected"
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected", "killed"})
 WAITING_STATUSES = frozenset(
@@ -124,6 +143,22 @@ def _latest_patch_attempt(db, run: SandboxRun) -> PatchAttempt | None:
         .order_by(PatchAttempt.id.desc())
         .first()
     )
+
+
+def _latest_diagnosis_text(db, run: SandboxRun) -> str | None:
+    event = (
+        db.query(AuditEvent)
+        .filter(
+            AuditEvent.run_id == run.id,
+            AuditEvent.action == "diagnosis",
+        )
+        .order_by(AuditEvent.id.desc())
+        .first()
+    )
+    if event is None:
+        return None
+    detail = event.detail
+    return detail if isinstance(detail, str) and detail.strip() else None
 
 
 def _repair_stale_apply(db, run: SandboxRun) -> None:
@@ -278,6 +313,161 @@ def _control_or_stop(db, run: SandboxRun) -> bool:
     return False
 
 
+def _clip_verify_output(text: str, limit: int = VERIFY_OUTPUT_LIMIT) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]"
+
+
+def _as_patch_result(value) -> PatchGenerationResult:
+    if isinstance(value, PatchGenerationResult):
+        return value
+    if isinstance(value, str):
+        return PatchGenerationResult(diff=value, tokens_used=None)
+    raise TypeError("generate_patch returned an unsupported result")
+
+
+def _add_llm_usage(run: SandboxRun, tokens: int | None) -> None:
+    if not tokens:
+        return
+    run.llm_tokens_used = (run.llm_tokens_used or 0) + int(tokens)
+
+
+def _llm_budget_exceeded(run: SandboxRun) -> bool:
+    budget = int(settings.llm_token_budget or 0)
+    return budget > 0 and (run.llm_tokens_used or 0) >= budget
+
+
+def _queue_patch_for_review(db, run: SandboxRun, diff: str, started) -> None:
+    run.patch_attempts = (run.patch_attempts or 0) + 1
+    run.current_diff = diff
+    run.pipeline_stage = STAGE_PATCH_REVIEW
+    db.add(
+        PatchAttempt(
+            run_id=run.id,
+            attempt_number=run.patch_attempts,
+            diff=diff,
+            status="pending_review",
+        )
+    )
+    db.commit()
+    create_pending_gate(db, run, PATCH_REVIEW_GATE)
+    _finish(run, started, "awaiting_patch_review")
+    db.commit()
+
+
+def _generate_retry_patch(
+    db,
+    run: SandboxRun,
+    *,
+    files: dict[str, str],
+    latest,
+    verify_err: str,
+    started,
+) -> None:
+    previous_error = verify_err
+    location_path = latest.diagnostic_path if latest else next(iter(files))
+    source = files.get(location_path, "")
+    diagnosis = _latest_diagnosis_text(db, run)
+    test_source = latest.test_source if latest else ""
+    while True:
+        if run.patch_attempts >= MAX_PATCH_ATTEMPTS:
+            _finish(run, started, "failed", "patch attempts exhausted")
+            db.commit()
+            return
+        if _llm_budget_exceeded(run):
+            _finish(run, started, "failed", "LLM token budget exceeded")
+            db.commit()
+            return
+        try:
+            generated = _as_patch_result(
+                generate_patch(
+                    path=location_path,
+                    source=source,
+                    test_source=test_source,
+                    stderr=previous_error,
+                    exception_type=None,
+                    previous_error=previous_error,
+                    files=files,
+                    diagnosis=diagnosis,
+                    tokens_used=run.llm_tokens_used or 0,
+                )
+            )
+        except LlmNotConfigured:
+            _finish(run, started, "failed", "LLM_API_KEY is not set")
+            db.commit()
+            return
+        except LlmTokenBudgetExceeded:
+            _finish(run, started, "failed", "LLM token budget exceeded")
+            db.commit()
+            return
+        except LlmRequestTimeout as exc:
+            previous_error = _clip_verify_output(str(exc))
+            run.patch_attempts = (run.patch_attempts or 0) + 1
+            db.add(
+                PatchAttempt(
+                    run_id=run.id,
+                    attempt_number=run.patch_attempts,
+                    diff=run.current_diff or "\n",
+                    status="failed",
+                    stderr=previous_error,
+                )
+            )
+            db.commit()
+            continue
+        _add_llm_usage(run, generated.tokens_used)
+        rejected = (
+            EMPTY_PATCH_ERROR
+            if not (generated.diff or "").strip()
+            else IDENTICAL_PATCH_ERROR
+            if diffs_are_identical(generated.diff, run.current_diff)
+            else None
+        )
+        if rejected:
+            previous_error = rejected
+            run.patch_attempts = (run.patch_attempts or 0) + 1
+            db.add(
+                PatchAttempt(
+                    run_id=run.id,
+                    attempt_number=run.patch_attempts,
+                    diff=generated.diff or (run.current_diff or "\n"),
+                    status="failed",
+                    stderr=rejected,
+                )
+            )
+            db.commit()
+            continue
+        _queue_patch_for_review(db, run, generated.diff, started)
+        return
+
+
+def _verification_failure(*, apply_err: str, suite, full) -> str:
+    if apply_err:
+        return apply_err
+    if suite is not None and not suite.reproduced and suite.exit_code != 0:
+        parts = [f"reproduction test failed (exit {suite.exit_code})"]
+        stdout = _clip_verify_output(suite.stdout)
+        stderr = _clip_verify_output(suite.stderr)
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append(stderr)
+        return "\n".join(parts).strip()
+    if full is not None and full.ran_tests and full.exit_code != 0:
+        parts = [f"full test suite failed (exit {full.exit_code})"]
+        stdout = _clip_verify_output(full.stdout)
+        stderr = _clip_verify_output(full.stderr)
+        if stdout:
+            parts.append(stdout)
+        if stderr:
+            parts.append(stderr)
+        return "\n".join(parts).strip()
+    if suite is not None and suite.stderr:
+        return suite.stderr
+    return ""
+
+
 def _finish(run: SandboxRun, started, status: str, error: str | None = None):
     finished = datetime.now(timezone.utc)
     run.status = status
@@ -291,6 +481,7 @@ def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         gate = _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
@@ -310,6 +501,7 @@ def clone_and_index(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
             ref=run.ref,
@@ -408,6 +600,7 @@ def clone_and_index(run_id: int) -> None:
                         db.commit()
 
                         if result.reproduced:
+                            diagnosis = None
                             try:
                                 diagnosis = diagnose_reproduction(
                                     path=location.path,
@@ -443,28 +636,22 @@ def clone_and_index(run_id: int) -> None:
                                 )
                                 return
                             try:
-                                diff = generate_patch(
-                                    path=location.path,
-                                    source=source,
-                                    test_source=reproduction.test_source,
-                                    stderr=result.stderr,
-                                    exception_type=parsed_trace.exception_type,
-                                )
-                                run.patch_attempts = 1
-                                run.current_diff = diff
-                                run.pipeline_stage = STAGE_PATCH_REVIEW
-                                db.add(
-                                    PatchAttempt(
-                                        run_id=run.id,
-                                        attempt_number=1,
-                                        diff=diff,
-                                        status="pending_review",
+                                generated = _as_patch_result(
+                                    generate_patch(
+                                        path=location.path,
+                                        source=source,
+                                        test_source=reproduction.test_source,
+                                        stderr=result.stderr,
+                                        exception_type=parsed_trace.exception_type,
+                                        files=files,
+                                        diagnosis=diagnosis,
+                                        tokens_used=run.llm_tokens_used or 0,
                                     )
                                 )
-                                db.commit()
-                                create_pending_gate(db, run, PATCH_REVIEW_GATE)
-                                _finish(run, started, "awaiting_patch_review")
-                                db.commit()
+                                _add_llm_usage(run, generated.tokens_used)
+                                _queue_patch_for_review(
+                                    db, run, generated.diff, started
+                                )
                                 notify_run_event(
                                     db,
                                     run,
@@ -474,6 +661,28 @@ def clone_and_index(run_id: int) -> None:
                                 )
                                 return
                             except LlmNotConfigured as exc:
+                                _finish(run, started, "failed", str(exc))
+                                db.commit()
+                                notify_run_event(
+                                    db, run, "Run failed", str(exc)[:180]
+                                )
+                                return
+                            except LlmTokenBudgetExceeded:
+                                _finish(
+                                    run,
+                                    started,
+                                    "failed",
+                                    "LLM token budget exceeded",
+                                )
+                                db.commit()
+                                notify_run_event(
+                                    db,
+                                    run,
+                                    "Run failed",
+                                    "LLM token budget exceeded",
+                                )
+                                return
+                            except LlmRequestTimeout as exc:
                                 _finish(run, started, "failed", str(exc))
                                 db.commit()
                                 notify_run_event(
@@ -529,6 +738,7 @@ def clone_and_index(run_id: int) -> None:
         notify_run_event(db, run, "Run failed", str(exc)[:180])
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()
@@ -542,6 +752,7 @@ def apply_patch_and_verify(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, PATCH_REVIEW_GATE)
@@ -560,6 +771,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
             ref=run.ref,
@@ -579,17 +791,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             )
             db.commit()
             return
-        sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
-        try:
-            sandbox.commands.run(
-                "cd /home/user/repo && git apply /tmp/autopatch.diff",
-                timeout=120,
-            )
-            apply_ok = True
-            apply_err = ""
-        except Exception as exc:
-            apply_ok = False
-            apply_err = str(exc)
+        apply_ok, apply_err = apply_diff_in_sandbox(sandbox, run.current_diff)
 
         latest = (
             db.query(ReproductionAttempt)
@@ -598,6 +800,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             .first()
         )
         suite = None
+        full = None
         if apply_ok and latest and latest.test_path and latest.test_source:
             suite = run_reproduction_test(
                 sandbox,
@@ -605,14 +808,23 @@ def apply_patch_and_verify(run_id: int) -> None:
                 latest.test_source,
                 install_dependencies=False,
             )
-            if not suite.reproduced:
+            if suite.reproduced:
+                tests_pass = False
+            elif suite.passed_clean:
                 full = run_full_test_suite(sandbox)
-                tests_pass = full.exit_code == 0
+                tests_pass = extra_suite_ok(full)
             else:
                 tests_pass = False
         else:
             tests_pass = False
 
+        verify_err = _verification_failure(
+            apply_err=apply_err,
+            suite=suite,
+            full=full,
+        )
+        if not tests_pass and not verify_err:
+            verify_err = "verification could not be completed"
         record = (
             db.query(PatchAttempt)
             .filter(PatchAttempt.run_id == run.id)
@@ -621,7 +833,16 @@ def apply_patch_and_verify(run_id: int) -> None:
         )
         if record:
             record.status = "applied" if tests_pass else "failed"
-            record.stderr = apply_err or (suite.stderr if suite else None)
+            if tests_pass:
+                record.stderr = apply_err or (suite.stderr if suite else None)
+                if full is not None and not full.ran_tests:
+                    record.stdout = ADDITIONAL_TESTS_SKIPPED
+            else:
+                record.stderr = verify_err or None
+                if full is not None and full.ran_tests and full.exit_code != 0:
+                    record.stdout = _clip_verify_output(full.stdout) or None
+                elif suite is not None and suite.exit_code != 0:
+                    record.stdout = _clip_verify_output(suite.stdout) or None
             db.commit()
 
         if tests_pass:
@@ -630,7 +851,10 @@ def apply_patch_and_verify(run_id: int) -> None:
             _finish(run, started, "awaiting_merge")
             db.commit()
             notify_run_event(
-                db, run, "Merge OTP required", f"{run.repo} is green"
+                db,
+                run,
+                "Merge OTP required",
+                extra_suite_merge_message(run.repo, full),
             )
             return
 
@@ -639,37 +863,14 @@ def apply_patch_and_verify(run_id: int) -> None:
             db.commit()
             return
 
-        location_path = latest.diagnostic_path if latest else next(iter(files))
-        source = files.get(location_path, "")
-        try:
-            diff = generate_patch(
-                path=location_path,
-                source=source,
-                test_source=latest.test_source if latest else "",
-                stderr=apply_err or (suite.stderr if suite else ""),
-                exception_type=None,
-                previous_error=apply_err,
-            )
-        except LlmNotConfigured:
-            _finish(run, started, "failed", "LLM_API_KEY is not set")
-            db.commit()
-            return
-
-        run.patch_attempts += 1
-        run.current_diff = diff
-        run.pipeline_stage = STAGE_PATCH_REVIEW
-        db.add(
-            PatchAttempt(
-                run_id=run.id,
-                attempt_number=run.patch_attempts,
-                diff=diff,
-                status="pending_review",
-            )
+        _generate_retry_patch(
+            db,
+            run,
+            files=files,
+            latest=latest,
+            verify_err=verify_err,
+            started=started,
         )
-        db.commit()
-        create_pending_gate(db, run, PATCH_REVIEW_GATE)
-        _finish(run, started, "awaiting_patch_review")
-        db.commit()
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
@@ -679,6 +880,7 @@ def apply_patch_and_verify(run_id: int) -> None:
         db.commit()
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()
@@ -692,6 +894,7 @@ def open_github_pr(run_id: int) -> None:
     db = SessionLocal()
     sandbox = None
     started = datetime.now(timezone.utc)
+    log_stack = ExitStack()
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, MERGE_GATE)
@@ -705,6 +908,7 @@ def open_github_pr(run_id: int) -> None:
             .one()
         )
         token = get_installation_token_sync(repo.installation_id)
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         branch = f"autopatch/run-{run.id}"
         sandbox, _files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
@@ -714,12 +918,11 @@ def open_github_pr(run_id: int) -> None:
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
         if run.current_diff:
-            sandbox.files.write("/tmp/autopatch.diff", run.current_diff)
-            sandbox.commands.run(
-                "cd /home/user/repo && git apply /tmp/autopatch.diff",
-                timeout=120,
-            )
-        sandbox.commands.run(
+            apply_ok, apply_err = apply_diff_in_sandbox(sandbox, run.current_diff)
+            if not apply_ok:
+                raise RuntimeError(apply_err or "git apply failed")
+        e2b_runner.run_sandbox_command(
+            sandbox,
             "cd /home/user/repo && "
             "git config user.email autopatch@local && "
             "git config user.name AutoPatch && "
@@ -727,7 +930,7 @@ def open_github_pr(run_id: int) -> None:
             "git add -A && "
             "git commit -m 'fix: verified autopatch' && "
             f"git push origin {branch}",
-            timeout=120,
+            120,
         )
         pr = create_pull_request(
             token=token,
@@ -760,6 +963,7 @@ def open_github_pr(run_id: int) -> None:
         db.commit()
         raise
     finally:
+        log_stack.close()
         if sandbox is not None:
             try:
                 sandbox.kill()

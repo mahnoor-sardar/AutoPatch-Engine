@@ -58,7 +58,7 @@ npm install
 npm run dev
 ```
 
-Opens a status page that calls `GET http://localhost:8000/health`.
+Opens the AutoPatch console (`http://localhost:3000`). It calls `GET /health`, sandbox run/audit APIs, `GET /v1/github/connected`, and connects to `WS /v1/ws/runs` with `NEXT_PUBLIC_API_KEY`.
 
 ## Android
 

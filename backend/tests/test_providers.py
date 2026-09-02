@@ -28,6 +28,71 @@ def test_generate_patch_requires_api_key(monkeypatch):
     raise AssertionError("expected LlmNotConfigured")
 
 
+def test_generate_patch_return_one_over_zero_is_git_applicable(monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+
+    from app.config import settings
+
+    # Exact run #507 attempt-1 payload: last hunk line has no terminating newline.
+    llm_content = (
+        "--- a/backend/tests/fixtures/autopatch_phase34.py\n"
+        "+++ b/backend/tests/fixtures/autopatch_phase34.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def reproduce_failure():\n"
+        "-    return 1 / 0\n"
+        "+    return 1"
+    )
+    assert not llm_content.endswith("\n")
+
+    monkeypatch.setattr(settings, "llm_api_key", "test-key")
+
+    def fake_completion(**kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content=llm_content))
+            ]
+        )
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    diff = generate_patch(
+        path="backend/tests/fixtures/autopatch_phase34.py",
+        source="def reproduce_failure():\n    return 1 / 0\n",
+        test_source="def test(): pass",
+        stderr="ZeroDivisionError",
+        exception_type="ZeroDivisionError",
+    )
+    assert diff.diff.endswith("\n")
+    assert "+    return 1\n" in diff.diff
+    assert diff.diff.splitlines()[-1] == "+    return 1"
+    assert diff.tokens_used is None
+
+    repo = tmp_path / "repo"
+    target = repo / "backend" / "tests" / "fixtures" / "autopatch_phase34.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"def reproduce_failure():\n    return 1 / 0\n")
+    patch_file = tmp_path / "autopatch.diff"
+    patch_file.write_bytes(diff.diff.encode("utf-8"))
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    applied = subprocess.run(
+        ["git", "apply", str(patch_file)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert target.read_text(encoding="utf-8") == (
+        "def reproduce_failure():\n    return 1\n"
+    )
+
+
 def test_generate_patch_routes_gemini_model_to_gemini_api_not_vertex(monkeypatch):
     from types import SimpleNamespace
 
@@ -67,16 +132,30 @@ def test_generate_patch_routes_gemini_model_to_gemini_api_not_vertex(monkeypatch
     kwargs = seen[0]
     assert kwargs["model"] == "gemini/gemini-3.7-flash"
     assert kwargs["api_key"] == "test-key"
-    assert kwargs["api_base"] == (
-        "https://generativelanguage.googleapis.com/v1beta/openai/"
-    )
+    assert kwargs["timeout"] == settings.llm_timeout_seconds
+    assert "api_base" not in kwargs
     _model, provider, _key, _api_base = get_llm_provider(
         model=kwargs["model"],
         api_key="dummy",
-        api_base=kwargs["api_base"],
     )
     assert provider == "gemini"
     assert provider != "vertex_ai"
+
+    seen.clear()
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o")
+    generate_patch(
+        path="a.py",
+        source="x=1",
+        test_source="def test(): pass",
+        stderr="boom",
+        exception_type="ValueError",
+    )
+    assert seen
+    assert seen[0]["model"] == "gpt-4o"
+    assert seen[0]["timeout"] == settings.llm_timeout_seconds
+    assert seen[0]["api_base"] == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
 
 
 def test_network_policy_denies_all_by_default():
@@ -98,6 +177,8 @@ def test_apply_egress_filter_runs_as_root():
     apply_egress_filter(Session())
     assert seen["user"] == "root"
     assert "OUTPUT DROP" in seen["command"]
+    assert '"$IPTABLES" -P OUTPUT DROP' in seen["command"]
+    assert '"$IP6TABLES" -P OUTPUT DROP' in seen["command"]
     assert "--dport 443 -j ACCEPT" not in seen["command"]
 
 

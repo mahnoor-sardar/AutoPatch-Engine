@@ -113,6 +113,40 @@ def test_github_ipv4_snapshot_used_for_iptables_and_hosts():
     assert hosts_pin > github_getent
 
 
+def test_egress_script_fail_closes_ipv6_without_github_v6_path():
+    script = _egress_filter_script()
+    ipv4 = script[: script.find("IP6TABLES=")]
+    ipv6 = script[script.find("IP6TABLES=") :]
+    assert "IP6TABLES=" in script
+    assert "ip6tables is required for sandbox IPv6 egress filtering" in script
+    assert '"$IP6TABLES" -P OUTPUT DROP' in script
+    assert '"$IP6TABLES" -A OUTPUT -o lo -j ACCEPT' in script
+    assert '"$IP6TABLES" -A OUTPUT -p udp --dport 53 -j ACCEPT' in script
+    assert '"$IP6TABLES" -A OUTPUT -p tcp --dport 53 -j ACCEPT' in script
+    assert "--dport 443 -j ACCEPT" not in script
+    assert "--dport 80 -j ACCEPT" not in script
+    assert "GITHUB_V6" not in script
+    assert "GITHUB_V4=" in ipv4
+    assert '"$IPTABLES" -P OUTPUT DROP' in ipv4
+    assert "BEGIN autopatch-github-ipv4-pin" in ipv4
+    assert "github.com" in ipv6
+    github_skip = 'if [ "$host" = github.com ]; then'
+    assert ipv6.count(github_skip) == 1
+    assert '"$IP6TABLES" -A OUTPUT -d "$ip" -j ACCEPT' in ipv6
+    assert script.find("IP6TABLES=") > script.find("BEGIN autopatch-github-ipv4-pin")
+
+
+def test_template_requires_ip6tables_binary():
+    import inspect
+
+    from app.services.e2b_template import TEMPLATE_PACKAGES, build_autopatch_template
+
+    assert "iptables" in TEMPLATE_PACKAGES
+    source = inspect.getsource(build_autopatch_template)
+    assert "command -v ip6tables" in source
+    assert "ip6tables --version" in source
+
+
 def test_pin_github_ipv4_hosts_uses_combined_refresh():
     seen = {}
 

@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4o"
     llm_api_base: str = ""
+    llm_token_budget: int = 50_000
+    llm_timeout_seconds: float = 60.0
     embedding_model: str = "text-embedding-3-small"
 
     gemini_api_key: str = ""

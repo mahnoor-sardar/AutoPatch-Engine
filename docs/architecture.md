@@ -5,7 +5,7 @@ Simple monorepo. No shared libraries or plugin frameworks.
 ## Folders
 
 - **backend/** — FastAPI, Celery, GitHub installation tokens, E2B clone, Tree-sitter symbols, FCM send.
-- **web/** — Next.js 14 App Router status page only. Live dashboard is Weeks 7–8.
+- **web/** — Next.js 14 App Router console: home, runs, repositories, activity, settings. It uses REST plus `GET/WS /v1/ws/runs`.
 - **android-app/** — Kotlin Compose companion: register device and receive a test push. OTP, biometrics, and remote pause/kill come later.
 - **infra/** — Docker Compose for local Postgres and Redis.
 - **docs/** — How to run and how pieces connect.
@@ -18,11 +18,10 @@ GitHub App webhook  -->  FastAPI  -->  PostgreSQL
                          Celery   -->  Tree-sitter   -->  PostgreSQL (symbols)
 Android app         -->  FastAPI (register device)
 FastAPI             -->  Firebase Cloud Messaging --> Android
-Web                 -->  FastAPI GET /health
+Web                 -->  FastAPI GET /health, /v1/sandbox/*, /v1/github/connected
+Web                 -->  FastAPI WebSocket /v1/ws/runs
 ```
 
-No WebSocket server in Weeks 1–2.
+The console consumes the run list, per-run audit, global audit, diagnosis, and connected repositories. Approval OTP/HMAC remains on Android.
 
-## Out of scope until later
-
-LangGraph/LiteLLM, repro/patch loop, Sentry/Datadog, OTP/biometric gates, mobile diff review, GitHub PR creation, pgvector, production deploy.
+The original Weeks 1–2 “out of scope” list is historical. Repro/patch, OTP gates, GitHub PRs, and the live web console now exist. This file is not a complete feature inventory.

@@ -7,6 +7,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -113,6 +114,11 @@ class SandboxRun(Base):
     )
 
     patch_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
+    llm_tokens_used: Mapped[int] = mapped_column(
         Integer,
         default=0,
     )
@@ -239,6 +245,27 @@ class Symbol(Base):
 
     run: Mapped[SandboxRun] = relationship(
         back_populates="symbols"
+    )
+
+
+class DeviceAuthReplay(Base):
+    __tablename__ = "device_auth_replays"
+    __table_args__ = (
+        UniqueConstraint(
+            "device_id",
+            "action_key",
+            "credential_hash",
+            name="uq_device_auth_replay",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(128), index=True)
+    action_key: Mapped[str] = mapped_column(String(256))
+    credential_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
     )
 
 
