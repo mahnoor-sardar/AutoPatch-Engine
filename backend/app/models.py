@@ -118,6 +118,11 @@ class SandboxRun(Base):
         default=0,
     )
 
+    llm_tokens_used: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
     pr_url: Mapped[str | None] = mapped_column(
         String(512),
         nullable=True,

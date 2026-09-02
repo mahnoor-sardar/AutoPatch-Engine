@@ -1,7 +1,15 @@
 from pathlib import Path
 
+from app.services.e2b_runner import (
+    COMMAND_TIMEOUT,
+    run_sandbox_command,
+    sanitize_log_text,
+)
+
 
 REPO_ROOT = "/home/user/repo"
+DIFF_PATH = "/tmp/autopatch.diff"
+_APPLY_OUTPUT_LIMIT = 4000
 
 
 def patch_target_paths(diff: str) -> list[str]:
@@ -68,3 +76,68 @@ def normalize_sandbox_patch_targets(
                 files_api.write(abs_path, content + "\n")
         except Exception:
             continue
+
+
+def command_exit_code(result) -> int:
+    return int(getattr(result, "exit_code", 0) or 0)
+
+
+def _clip_apply_output(text: str) -> str:
+    text = sanitize_log_text(text or "")
+    if len(text) <= _APPLY_OUTPUT_LIMIT:
+        return text
+    return text[:_APPLY_OUTPUT_LIMIT] + "\n...[truncated]"
+
+
+def _write_sandbox_diff(sandbox, diff: str) -> None:
+    files_api = getattr(sandbox, "files", None)
+    if hasattr(sandbox, "write_file"):
+        sandbox.write_file(DIFF_PATH, diff)
+        return
+    if files_api is not None:
+        files_api.write(DIFF_PATH, diff)
+        return
+    raise RuntimeError("sandbox cannot write patch diff")
+
+
+def _git_apply_error(label: str, result=None, exc: BaseException | None = None) -> str:
+    if exc is not None:
+        code = int(getattr(exc, "exit_code", 1) or 1)
+        stderr = getattr(exc, "stderr", "") or ""
+        stdout = getattr(exc, "stdout", "") or ""
+        detail = _clip_apply_output(stderr or stdout or str(exc))
+        suffix = f" (exit {code})"
+        if detail:
+            return f"{label}{suffix}: {detail}"
+        return f"{label}{suffix}"
+    code = command_exit_code(result)
+    stderr = _clip_apply_output(getattr(result, "stderr", "") or "")
+    stdout = _clip_apply_output(getattr(result, "stdout", "") or "")
+    detail = stderr or stdout
+    suffix = f" (exit {code})"
+    if detail:
+        return f"{label}{suffix}: {detail}"
+    return f"{label}{suffix}"
+
+
+def apply_diff_in_sandbox(sandbox, diff: str) -> tuple[bool, str]:
+    """Normalize targets, `git apply --check`, then `git apply`."""
+    if not (diff or "").strip():
+        return False, "no patch diff to apply"
+    _write_sandbox_diff(sandbox, diff)
+    normalize_sandbox_patch_targets(sandbox, diff)
+    check_cmd = f"cd {REPO_ROOT} && git apply --check {DIFF_PATH}"
+    apply_cmd = f"cd {REPO_ROOT} && git apply {DIFF_PATH}"
+    try:
+        checked = run_sandbox_command(sandbox, check_cmd, COMMAND_TIMEOUT)
+    except Exception as exc:
+        return False, _git_apply_error("git apply --check failed", exc=exc)
+    if command_exit_code(checked) != 0:
+        return False, _git_apply_error("git apply --check failed", result=checked)
+    try:
+        applied = run_sandbox_command(sandbox, apply_cmd, COMMAND_TIMEOUT)
+    except Exception as exc:
+        return False, _git_apply_error("git apply failed", exc=exc)
+    if command_exit_code(applied) != 0:
+        return False, _git_apply_error("git apply failed", result=applied)
+    return True, ""
