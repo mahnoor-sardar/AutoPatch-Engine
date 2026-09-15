@@ -129,6 +129,54 @@ def test_a_clone_task_noop_on_completed(monkeypatch):
         db.close()
 
 
+def test_clone_and_index_does_not_provision_while_gate_pending(monkeypatch):
+    db = SessionLocal()
+    try:
+        repo = _ensure_test_repository(db)
+        run = SandboxRun(
+            status="queued",
+            repo=repo.full_name,
+            ref=repo.default_branch,
+            pipeline_stage="provision",
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        db.add(
+            ApprovalGate(
+                run_id=run.id,
+                gate="sandbox_provision",
+                status="pending",
+            )
+        )
+        db.commit()
+        run_id = run.id
+    finally:
+        db.close()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("clone must wait for sandbox_provision approval")
+
+    monkeypatch.setattr(
+        "app.workers.tasks.e2b_runner.clone_and_read_sources_in_sandbox",
+        boom,
+    )
+    try:
+        clone_and_index.run(run_id)
+    except RuntimeError as exc:
+        assert "sandbox_provision" in str(exc)
+        assert "approval" in str(exc)
+
+    db = SessionLocal()
+    try:
+        again = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+        assert again.status == "queued"
+        assert again.e2b_sandbox_id is None
+        assert again.pipeline_stage == "provision"
+    finally:
+        db.close()
+
+
 def test_b_starting_stage_clears_old_timing():
     old_finish = _now() - timedelta(minutes=10)
     run = SandboxRun(

@@ -286,7 +286,7 @@ def _payload_with_repo(base: dict) -> dict:
 def _stub_run_side_effects(monkeypatch) -> list:
     delayed: list[int] = []
     monkeypatch.setattr(
-        "app.workers.tasks.clone_and_index.delay",
+        "app.routers.observability._enqueue_clone_and_index",
         lambda run_id: delayed.append(run_id),
     )
     monkeypatch.setattr(
@@ -325,7 +325,6 @@ def _assert_ingest_created_pending_run(
     assert payload["ok"] is True
     assert payload["provider"] == provider
     assert payload["id"] > last_ingest_id
-    assert delayed == []
 
     db = SessionLocal()
     try:
@@ -359,13 +358,12 @@ def _assert_ingest_created_pending_run(
         )
         assert gate is not None
         assert gate.status == "pending"
+        assert delayed == [run.id]
     finally:
         db.close()
 
-    assert delayed == []
 
-
-def test_sentry_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
+def test_sentry_creates_pending_gate_and_enqueues_clone_once(monkeypatch):
     _override_secrets(monkeypatch)
     delayed = _stub_run_side_effects(monkeypatch)
     last_run_id, last_ingest_id = _seed_registered_repo()
@@ -385,7 +383,7 @@ def test_sentry_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
     )
 
 
-def test_sentry_live_error_payload_creates_pending_gate_and_does_not_enqueue_clone(
+def test_sentry_live_error_payload_creates_pending_gate_and_enqueues_clone_once(
     monkeypatch,
 ):
     _override_secrets(monkeypatch)
@@ -412,7 +410,7 @@ def test_sentry_live_error_payload_creates_pending_gate_and_does_not_enqueue_clo
     assert payload["frames"][0]["line"] == 10
 
 
-def test_datadog_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
+def test_datadog_creates_pending_gate_and_enqueues_clone_once(monkeypatch):
     _override_secrets(monkeypatch)
     delayed = _stub_run_side_effects(monkeypatch)
     last_run_id, last_ingest_id = _seed_registered_repo()
@@ -431,3 +429,20 @@ def test_datadog_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
         last_ingest_id=last_ingest_id,
         provider="datadog",
     )
+
+
+def test_duplicate_sentry_ingest_creates_separate_runs_and_jobs(monkeypatch):
+    _override_secrets(monkeypatch)
+    delayed = _stub_run_side_effects(monkeypatch)
+    last_run_id, _last_ingest_id = _seed_registered_repo()
+
+    body = json.dumps(_payload_with_repo(SENTRY_PAYLOAD)).encode()
+    headers = {"Sentry-Hook-Signature": _sign(body, SENTRY_SECRET)}
+    first = client.post("/v1/webhooks/sentry", content=body, headers=headers)
+    second = client.post("/v1/webhooks/sentry", content=body, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["id"] != second.json()["id"]
+    assert len(delayed) == 2
+    assert delayed[0] != delayed[1]
+    assert all(run_id > last_run_id for run_id in delayed)

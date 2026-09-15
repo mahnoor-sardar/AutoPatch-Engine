@@ -89,10 +89,10 @@ def test_webhook_ping_ok():
     assert response.json()["event"] == "ping"
 
 
-def test_push_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
+def test_push_creates_pending_gate_and_enqueues_clone_once(monkeypatch):
     delayed = []
     monkeypatch.setattr(
-        "app.workers.tasks.clone_and_index.delay",
+        "app.routers.github._enqueue_clone_and_index",
         lambda run_id: delayed.append(run_id),
     )
     monkeypatch.setattr(
@@ -122,7 +122,6 @@ def test_push_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
     assert payload.get("run_id")
     assert payload["gate"] == "sandbox_provision"
     assert payload["gate_status"] == "pending"
-    assert delayed == []
 
     run_id = payload["run_id"]
     db = SessionLocal()
@@ -143,4 +142,38 @@ def test_push_creates_pending_gate_and_does_not_enqueue_clone(monkeypatch):
     finally:
         db.close()
 
-    assert delayed == []
+    assert delayed == [run_id]
+
+
+def test_duplicate_push_creates_separate_runs_and_jobs(monkeypatch):
+    delayed = []
+    monkeypatch.setattr(
+        "app.routers.github._enqueue_clone_and_index",
+        lambda run_id: delayed.append(run_id),
+    )
+    monkeypatch.setattr(
+        "app.services.fcm.send_push",
+        lambda *args, **kwargs: "ok",
+    )
+
+    db = SessionLocal()
+    try:
+        _ensure_owner_repo(db)
+    finally:
+        db.close()
+
+    body = json.dumps(
+        {
+            "ref": "refs/heads/main",
+            "repository": {"full_name": "owner/repo"},
+        }
+    ).encode()
+    headers = _signed_headers(body, "push")
+    first = client.post("/v1/github/webhook", content=body, headers=headers)
+    second = client.post("/v1/github/webhook", content=body, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_id = first.json()["run_id"]
+    second_id = second.json()["run_id"]
+    assert first_id != second_id
+    assert delayed == [first_id, second_id]

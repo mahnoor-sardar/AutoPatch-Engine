@@ -747,6 +747,10 @@ def clone_and_index(run_id: int) -> None:
         db.close()
 
 
+def enqueue_clone_and_index(run_id: int) -> None:
+    clone_and_index.delay(run_id)
+
+
 @celery_app.task(name="apply_patch_and_verify")
 def apply_patch_and_verify(run_id: int) -> None:
     db = SessionLocal()

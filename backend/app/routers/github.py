@@ -14,6 +14,13 @@ from app.services.github_app import get_installation_token, verify_webhook_signa
 
 router = APIRouter()
 
+
+def _enqueue_clone_and_index(run_id: int) -> None:
+    from app.workers.tasks import enqueue_clone_and_index
+
+    enqueue_clone_and_index(run_id)
+
+
 def _upsert_repos(db: Session, installation_id: int, repos: list[dict]) -> None:
     rows = []
 
@@ -171,6 +178,7 @@ async def github_webhook(
         db.refresh(run)
 
         gate = create_pending_provision_gate(db, run)
+        _enqueue_clone_and_index(run.id)
 
         return {
             "ok": True,

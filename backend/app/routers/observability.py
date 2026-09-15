@@ -15,6 +15,12 @@ from app.services.stacktrace import parse_stack_trace
 router = APIRouter()
 
 
+def _enqueue_clone_and_index(run_id: int) -> None:
+    from app.workers.tasks import enqueue_clone_and_index
+
+    enqueue_clone_and_index(run_id)
+
+
 def _verify_signature(
     body: bytes,
     signature: str | None,
@@ -256,6 +262,7 @@ def _maybe_start_run(
     db.commit()
     db.refresh(run)
     create_pending_provision_gate(db, run)
+    _enqueue_clone_and_index(run.id)
 
 
 def _ingest(
