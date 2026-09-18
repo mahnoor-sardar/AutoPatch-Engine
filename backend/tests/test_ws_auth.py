@@ -8,13 +8,22 @@ from app.auth import (
     secrets_match,
     ticket_from_ws_protocols,
     verify_ws_ticket,
+    ws_api_key_header_allowed,
     ws_subprotocol_for_ticket,
 )
+from app.config import settings
 from app.main import app
 
 
 client = TestClient(app)
 HEADERS = {"X-API-Key": "dev-local-key"}
+
+
+def test_ws_api_key_header_allowed_only_in_dev_envs(monkeypatch):
+    monkeypatch.setattr(settings, "app_env", "test")
+    assert ws_api_key_header_allowed() is True
+    monkeypatch.setattr(settings, "app_env", "production")
+    assert ws_api_key_header_allowed() is False
 
 
 def test_secrets_match_uses_compare_digest_and_rejects_odd_values():
@@ -94,9 +103,43 @@ def test_websocket_accepts_valid_header_key(monkeypatch):
         "app.services.events.subscribe_run_updates",
         fake_subscribe,
     )
+    monkeypatch.setattr(settings, "app_env", "test")
     with client.websocket_connect(
         "/v1/ws/runs",
         headers={"X-API-Key": "dev-local-key"},
+    ) as ws:
+        first = ws.receive_json()
+        assert "runs" in first
+
+
+def test_websocket_rejects_api_key_header_outside_dev_envs(monkeypatch):
+    monkeypatch.setattr(settings, "app_env", "production")
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/v1/ws/runs",
+            headers={"X-API-Key": "dev-local-key"},
+        ):
+            raise AssertionError("production must not accept WS API-key headers")
+    assert exc_info.value.code == 1008
+
+
+def test_websocket_accepts_ticket_in_production(monkeypatch):
+    _stub_empty_runs(monkeypatch)
+
+    async def fake_subscribe():
+        raise WebSocketDisconnect()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(
+        "app.services.events.subscribe_run_updates",
+        fake_subscribe,
+    )
+    monkeypatch.setattr(settings, "app_env", "production")
+    ticket = client.get("/v1/ws/ticket", headers=HEADERS).json()["ticket"]
+    protocol = ws_subprotocol_for_ticket(ticket)
+    with client.websocket_connect(
+        "/v1/ws/runs",
+        subprotocols=[protocol],
     ) as ws:
         first = ws.receive_json()
         assert "runs" in first

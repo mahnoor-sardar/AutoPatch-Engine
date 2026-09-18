@@ -10,6 +10,8 @@ from app.config import settings
 WS_TICKET_TTL_SECONDS = 90
 WS_TICKET_PREFIX = "autopatch."
 _WS_TICKET_MESSAGE = "ws-ticket"
+# Long-lived X-API-Key on the WebSocket upgrade is local/dev/test tooling only.
+_WS_API_KEY_HEADER_ENVS = frozenset({"local", "dev", "development", "test"})
 
 
 def secrets_match(provided: str | None, expected: str | None) -> bool:
@@ -26,6 +28,11 @@ def require_api_key(
 ) -> None:
     if not secrets_match(x_api_key, settings.api_key):
         raise HTTPException(status_code=401, detail="invalid api key")
+
+
+def ws_api_key_header_allowed() -> bool:
+    """True when the WS upgrade may use X-API-Key (non-browser/dev only)."""
+    return settings.app_env.lower() in _WS_API_KEY_HEADER_ENVS
 
 
 def require_device_enrollment(

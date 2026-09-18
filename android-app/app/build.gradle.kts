@@ -15,18 +15,53 @@ if (localPropertiesFile.exists()) {
     }
 }
 
-val autoPatchApiKey =
-    localProperties.getProperty("AUTOPATCH_API_KEY") ?: ""
+fun clientProperty(name: String): String {
+    val fromFile = localProperties.getProperty(name)?.trim().orEmpty()
+    if (fromFile.isNotEmpty()) {
+        return fromFile
+    }
+    return System.getenv(name)?.trim().orEmpty()
+}
 
-val deviceEnrollmentSecret =
-    localProperties.getProperty("AUTOPATCH_DEVICE_ENROLLMENT_SECRET") ?: ""
+fun javaStringLiteral(value: String): String {
+    return "\"" +
+        value.replace("\\", "\\\\").replace("\"", "\\\"") +
+        "\""
+}
 
-val githubInstallationId =
-    localProperties.getProperty("AUTOPATCH_GITHUB_INSTALLATION_ID") ?: ""
+fun isForbiddenDevSecret(value: String, vararg developmentDefaults: String): Boolean {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty()) {
+        return true
+    }
+    return developmentDefaults.any { it.equals(trimmed, ignoreCase = true) }
+}
 
-val autoPatchBaseUrl =
-    localProperties.getProperty("AUTOPATCH_BASE_URL")
-        ?: ""
+fun requireReleaseClientSecrets() {
+    val apiKey = clientProperty("AUTOPATCH_RELEASE_API_KEY")
+    val enrollment = clientProperty("AUTOPATCH_RELEASE_DEVICE_ENROLLMENT_SECRET")
+    if (isForbiddenDevSecret(apiKey, "dev-local-key")) {
+        throw GradleException(
+            "Release builds require AUTOPATCH_RELEASE_API_KEY in local.properties " +
+                "or the environment. Do not ship development keys such as " +
+                "dev-local-key."
+        )
+    }
+    if (isForbiddenDevSecret(enrollment, "dev-enrollment-secret")) {
+        throw GradleException(
+            "Release builds require AUTOPATCH_RELEASE_DEVICE_ENROLLMENT_SECRET " +
+                "in local.properties or the environment. Do not ship development " +
+                "enrollment secrets."
+        )
+    }
+}
+
+val githubInstallationId = clientProperty("AUTOPATCH_GITHUB_INSTALLATION_ID")
+val autoPatchBaseUrl = clientProperty("AUTOPATCH_BASE_URL")
+val debugApiKey = clientProperty("AUTOPATCH_API_KEY")
+val debugEnrollmentSecret = clientProperty("AUTOPATCH_DEVICE_ENROLLMENT_SECRET")
+val releaseApiKey = clientProperty("AUTOPATCH_RELEASE_API_KEY")
+val releaseEnrollmentSecret = clientProperty("AUTOPATCH_RELEASE_DEVICE_ENROLLMENT_SECRET")
 
 android {
     namespace = "com.mahify.autopatch"
@@ -47,34 +82,44 @@ android {
 
         buildConfigField(
             "String",
-            "AUTOPATCH_API_KEY",
-            "\"$autoPatchApiKey\""
-        )
-
-        buildConfigField(
-            "String",
-            "AUTOPATCH_DEVICE_ENROLLMENT_SECRET",
-            "\"$deviceEnrollmentSecret\""
-        )
-
-        buildConfigField(
-            "String",
             "GITHUB_INSTALLATION_ID",
-            "\"$githubInstallationId\""
+            javaStringLiteral(githubInstallationId)
         )
 
         buildConfigField(
             "String",
             "AUTOPATCH_BASE_URL",
-            "\"$autoPatchBaseUrl\""
+            javaStringLiteral(autoPatchBaseUrl)
         )
     }
 
     buildTypes {
+        debug {
+            buildConfigField(
+                "String",
+                "AUTOPATCH_API_KEY",
+                javaStringLiteral(debugApiKey)
+            )
+            buildConfigField(
+                "String",
+                "AUTOPATCH_DEVICE_ENROLLMENT_SECRET",
+                javaStringLiteral(debugEnrollmentSecret)
+            )
+        }
         release {
             optimization {
                 enable = false
             }
+            buildConfigField(
+                "String",
+                "AUTOPATCH_API_KEY",
+                javaStringLiteral(releaseApiKey)
+            )
+            buildConfigField(
+                "String",
+                "AUTOPATCH_DEVICE_ENROLLMENT_SECRET",
+                javaStringLiteral(releaseEnrollmentSecret)
+            )
         }
     }
 
@@ -146,4 +191,19 @@ dependencies {
     debugImplementation(
         libs.androidx.compose.ui.tooling
     )
+}
+
+gradle.taskGraph.whenReady {
+    val assemblingRelease = gradle.taskGraph.allTasks.any { task ->
+        val name = task.name
+        name.contains("Release") && (
+            name.contains("assemble") ||
+                name.contains("bundle") ||
+                name.contains("generateReleaseBuildConfig") ||
+                name.contains("packageRelease")
+        )
+    }
+    if (assemblingRelease) {
+        requireReleaseClientSecrets()
+    }
 }

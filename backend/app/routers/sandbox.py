@@ -12,6 +12,7 @@ from app.auth import (
     secrets_match,
     ticket_from_ws_protocols,
     verify_ws_ticket,
+    ws_api_key_header_allowed,
     ws_subprotocol_for_ticket,
 )
 from app.config import settings
@@ -894,10 +895,12 @@ async def runs_socket(websocket: WebSocket):
         websocket.headers.get("sec-websocket-protocol")
     )
     accept_subprotocol: str | None = None
-    if secrets_match(header_key, settings.api_key):
-        pass
-    elif ticket and verify_ws_ticket(ticket):
+    if ticket and verify_ws_ticket(ticket):
         accept_subprotocol = ws_subprotocol_for_ticket(ticket)
+    elif ws_api_key_header_allowed() and secrets_match(
+        header_key, settings.api_key
+    ):
+        pass
     else:
         await websocket.close(code=1008)
         return
