@@ -3,9 +3,7 @@ import hmac
 import time
 
 from datetime import datetime, timedelta, timezone
-import hashlib
-import hmac
-import time
+from typing import Literal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,6 +14,36 @@ from app.services import totp
 TOKEN_TTL_SECONDS = 90
 AUTH_REPLAY_TTL_SECONDS = 120
 
+AuthFactor = Literal["otp", "token"]
+
+
+def device_auth_factor(
+    device: Device,
+    otp_code: str | None,
+    approval_token: str | None = None,
+    token_ts: int | None = None,
+    payload: str = "",
+) -> AuthFactor | None:
+    if device is None or not device.totp_secret:
+        return None
+
+    if otp_code and totp.verify_code(device.totp_secret, otp_code):
+        return "otp"
+
+    if approval_token and token_ts is not None:
+        now = int(time.time())
+        if abs(now - int(token_ts)) > TOKEN_TTL_SECONDS:
+            return None
+        expected = hmac.new(
+            device.totp_secret.encode("utf-8"),
+            f"{payload}|{token_ts}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(expected, approval_token):
+            return "token"
+
+    return None
+
 
 def verify_device_authorization(
     device: Device,
@@ -24,24 +52,16 @@ def verify_device_authorization(
     token_ts: int | None = None,
     payload: str = "",
 ) -> bool:
-    if device is None or not device.totp_secret:
-        return False
-
-    if otp_code and totp.verify_code(device.totp_secret, otp_code):
-        return True
-
-    if approval_token and token_ts is not None:
-        now = int(time.time())
-        if abs(now - int(token_ts)) > TOKEN_TTL_SECONDS:
-            return False
-        expected = hmac.new(
-            device.totp_secret.encode("utf-8"),
-            f"{payload}|{token_ts}".encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(expected, approval_token)
-
-    return False
+    return (
+        device_auth_factor(
+            device,
+            otp_code,
+            approval_token,
+            token_ts,
+            payload,
+        )
+        is not None
+    )
 
 
 def _auth_fingerprint(
@@ -49,13 +69,18 @@ def _auth_fingerprint(
     payload: str,
     otp_code: str | None,
     approval_token: str | None,
+    auth_factor: AuthFactor | None,
 ) -> str | None:
     secret = (device.totp_secret or "").encode("utf-8")
-    if not secret:
+    if not secret or not auth_factor:
         return None
-    if otp_code:
+    if auth_factor == "otp":
+        if not otp_code:
+            return None
         material = f"{payload}|otp|{otp_code}".encode("utf-8")
-    elif approval_token:
+    elif auth_factor == "token":
+        if not approval_token:
+            return None
         material = f"{payload}|tok|{approval_token}".encode("utf-8")
     else:
         return None
@@ -68,13 +93,22 @@ def consume_device_authorization(
     payload: str,
     otp_code: str | None,
     approval_token: str | None = None,
+    *,
+    auth_factor: AuthFactor | None,
 ) -> bool:
-    """Record a one-time use of this OTP/token for this action.
+    """Record a one-time use of the credential that authorized this action.
 
+    ``auth_factor`` must be the factor that already passed verification.
     Returns False if the same credential was already used for the same
-    action_key (payload). Does not store the raw OTP.
+    action_key (payload). Does not store the raw OTP or token.
     """
-    digest = _auth_fingerprint(device, payload, otp_code, approval_token)
+    digest = _auth_fingerprint(
+        device,
+        payload,
+        otp_code,
+        approval_token,
+        auth_factor,
+    )
     if digest is None:
         return False
     action_key = payload[:256]

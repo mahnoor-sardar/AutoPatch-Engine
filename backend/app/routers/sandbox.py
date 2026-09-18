@@ -50,8 +50,8 @@ from app.services.audit import (
     RESULT_REJECTED,
     RESULT_SUCCESS,
     consume_device_authorization,
+    device_auth_factor,
     log_audit,
-    verify_device_authorization,
 )
 from app.services.e2b_runner import sanitize_log_text
 from app.services.events import publish_run_update
@@ -325,16 +325,22 @@ def approve_sandbox(
     device = _require_device(db, body.device_id)
     _require_gate_device(gate, device.device_id)
     payload = f"{device.device_id}|{run.id}|{gate.gate}"
-    if not verify_device_authorization(
+    auth_factor = device_auth_factor(
         device,
         body.otp_code,
         body.approval_token,
         body.token_ts,
         payload,
-    ):
+    )
+    if auth_factor is None:
         raise HTTPException(status_code=401, detail="invalid otp")
     if not consume_device_authorization(
-        db, device, payload, body.otp_code, body.approval_token
+        db,
+        device,
+        payload,
+        body.otp_code,
+        body.approval_token,
+        auth_factor=auth_factor,
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
@@ -409,16 +415,22 @@ def reject_sandbox(
     device = _require_device(db, body.device_id)
     _require_gate_device(gate, device.device_id)
     payload = f"{device.device_id}|{run.id}|{gate.gate}"
-    if not verify_device_authorization(
+    auth_factor = device_auth_factor(
         device,
         body.otp_code,
         body.approval_token,
         body.token_ts,
         payload,
-    ):
+    )
+    if auth_factor is None:
         raise HTTPException(status_code=401, detail="invalid otp")
     if not consume_device_authorization(
-        db, device, payload, body.otp_code, body.approval_token
+        db,
+        device,
+        payload,
+        body.otp_code,
+        body.approval_token,
+        auth_factor=auth_factor,
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
@@ -456,16 +468,22 @@ def _control(
     run = _require_run(db, run_id)
     device = _require_device(db, body.device_id)
     payload = f"{device.device_id}|{run.id}|{action}"
-    if not verify_device_authorization(
+    auth_factor = device_auth_factor(
         device,
         body.otp_code,
         None,
         None,
         payload,
-    ):
+    )
+    if auth_factor is None:
         raise HTTPException(status_code=401, detail="invalid otp")
     if not consume_device_authorization(
-        db, device, payload, body.otp_code, None
+        db,
+        device,
+        payload,
+        body.otp_code,
+        None,
+        auth_factor=auth_factor,
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
