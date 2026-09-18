@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
-import shlex
 
 from app.services.e2b_runner import COMMAND_TIMEOUT, install_project_dependencies, run_sandbox_command
 
@@ -169,7 +168,7 @@ def extra_suite_ok(result: ReproductionResult | None) -> bool:
     if result is None:
         return False
     if not result.ran_tests:
-        return True
+        return False
     return result.exit_code == 0
 
 
@@ -254,55 +253,9 @@ def relevant_backend_test_files(
     )
 
 
-def _changed_python_files(sandbox) -> list[str]:
-    result = _run_command(
-        sandbox,
-        "git -C /home/user/repo diff --name-only -- '*.py'",
-        REPRO_TIMEOUT,
-    )
-    return [
-        line.strip()
-        for line in (result.stdout or "").splitlines()
-        if line.strip()
-    ]
-
-
-def run_full_test_suite(sandbox) -> ReproductionResult:
+def _suite_command_result(sandbox, command: str) -> ReproductionResult:
     try:
-        if test_path_exists(sandbox, "/home/user/repo/package.json"):
-            result = _run_command(
-                sandbox,
-                "cd /home/user/repo && npm test --if-present",
-                REPRO_TIMEOUT,
-            )
-        elif test_path_exists(sandbox, "/home/user/repo/backend"):
-            changed = _changed_python_files(sandbox)
-            relevant = relevant_python_test_files(
-                changed,
-                test_file_exists=lambda rel: test_path_exists(
-                    sandbox, f"/home/user/repo/backend/{rel}"
-                ),
-            )
-            if not relevant:
-                return ReproductionResult(
-                    exit_code=0,
-                    stdout=ADDITIONAL_TESTS_SKIPPED,
-                    stderr="",
-                    ran_tests=False,
-                )
-            quoted = " ".join(shlex.quote(p) for p in relevant)
-            result = _run_command(
-                sandbox,
-                "cd /home/user/repo/backend && "
-                f"{_BACKEND_PYTEST_ENV} python -m pytest -q {quoted}",
-                REPRO_TIMEOUT,
-            )
-        else:
-            result = _run_command(
-                sandbox,
-                "cd /home/user/repo && python -m pytest -q",
-                REPRO_TIMEOUT,
-            )
+        result = _run_command(sandbox, command, REPRO_TIMEOUT)
         return ReproductionResult(
             exit_code=int(getattr(result, "exit_code", 0) or 0),
             stdout=result.stdout or "",
@@ -314,7 +267,61 @@ def run_full_test_suite(sandbox) -> ReproductionResult:
             exit_code=int(getattr(exc, "exit_code", 1) or 1),
             stdout=getattr(exc, "stdout", "") or "",
             stderr=getattr(exc, "stderr", "") or str(exc),
+            ran_tests=True,
         )
+
+
+def _combine_suite_results(parts: list[ReproductionResult]) -> ReproductionResult:
+    if not parts:
+        return ReproductionResult(
+            exit_code=1,
+            stdout="",
+            stderr="no applicable regression suite ran",
+            ran_tests=False,
+        )
+    ran = all(part.ran_tests for part in parts)
+    failed = [part.exit_code for part in parts if part.exit_code != 0]
+    if not ran:
+        exit_code = failed[0] if failed else 1
+    elif failed:
+        exit_code = failed[0]
+    else:
+        exit_code = 0
+    return ReproductionResult(
+        exit_code=exit_code,
+        stdout="\n".join(part.stdout for part in parts if part.stdout),
+        stderr="\n".join(part.stderr for part in parts if part.stderr),
+        ran_tests=ran,
+    )
+
+
+def run_full_test_suite(sandbox) -> ReproductionResult:
+    has_npm = test_path_exists(sandbox, "/home/user/repo/package.json")
+    has_backend = test_path_exists(sandbox, "/home/user/repo/backend")
+    parts: list[ReproductionResult] = []
+    if has_npm:
+        parts.append(
+            _suite_command_result(
+                sandbox,
+                "cd /home/user/repo && npm test",
+            )
+        )
+    if has_backend:
+        parts.append(
+            _suite_command_result(
+                sandbox,
+                "cd /home/user/repo/backend && "
+                f"{_BACKEND_PYTEST_ENV} python -m pytest -q",
+            )
+        )
+    if not has_npm and not has_backend:
+        parts.append(
+            _suite_command_result(
+                sandbox,
+                "cd /home/user/repo && python -m pytest -q",
+            )
+        )
+    return _combine_suite_results(parts)
 
 
 def test_path_exists(sandbox, path: str) -> bool:

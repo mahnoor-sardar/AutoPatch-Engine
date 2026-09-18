@@ -767,16 +767,14 @@ def test_clean_repro_still_runs_full_suite_and_reaches_merge(monkeypatch):
     assert generated == []
 
 
-def test_skipped_additional_tests_reach_merge_without_claiming_suite_passed(
-    monkeypatch,
-):
+def test_skipped_additional_tests_do_not_reach_merge(monkeypatch):
     run_id = _seed_apply_verify_run()
     _stub_apply_verify(monkeypatch)
     notices = []
 
     monkeypatch.setattr(
         "app.workers.tasks.notify_run_event",
-        lambda db, run, title, body, extra=None: notices.append(body),
+        lambda db, run, title, body, extra=None: notices.append((title, body)),
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_full_test_suite",
@@ -787,6 +785,10 @@ def test_skipped_additional_tests_reach_merge_without_claiming_suite_passed(
             ran_tests=False,
         ),
     )
+    monkeypatch.setattr(
+        "app.workers.tasks.generate_patch",
+        lambda **kwargs: "diff --git a/y b/y\n--- a/y\n+++ b/y\n",
+    )
     apply_patch_and_verify.run(run_id)
     db = SessionLocal()
     try:
@@ -795,15 +797,12 @@ def test_skipped_additional_tests_reach_merge_without_claiming_suite_passed(
             .filter(PatchAttempt.run_id == run_id, PatchAttempt.attempt_number == 1)
             .one()
         )
-        assert applied.status == "applied"
-        assert applied.stdout == ADDITIONAL_TESTS_SKIPPED
+        assert applied.status == "failed"
         run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
-        assert run.status == "awaiting_merge"
+        assert run.status != "awaiting_merge"
     finally:
         db.close()
-    assert notices
-    assert "no additional project tests were selected" in notices[0]
-    assert "all tests passed" not in notices[0].lower()
+    assert not any(title == "Merge OTP required" for title, _body in notices)
 
 
 def test_apply_check_failure_skips_tests_and_feeds_retry(monkeypatch):

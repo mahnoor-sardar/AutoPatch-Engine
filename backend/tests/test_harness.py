@@ -314,11 +314,21 @@ def test_reproduction_skips_install_when_requested(monkeypatch):
 
 
 class _SuiteSandbox:
-    def __init__(self, existing, git_stdout="", pytest_exit=0, pytest_stderr=""):
+    def __init__(
+        self,
+        existing,
+        git_stdout="",
+        pytest_exit=0,
+        pytest_stderr="",
+        npm_exit=None,
+        npm_stderr="",
+    ):
         self.existing = existing
         self.git_stdout = git_stdout
         self.pytest_exit = pytest_exit
         self.pytest_stderr = pytest_stderr
+        self.npm_exit = pytest_exit if npm_exit is None else npm_exit
+        self.npm_stderr = npm_stderr
         self.ran = []
 
     def run(self, command, timeout=30):
@@ -327,13 +337,13 @@ class _SuiteSandbox:
             path = command[len("test -e ") :].split(";", 1)[0].strip()
             code = "0" if path in self.existing else "1"
             return SimpleNamespace(stdout=f"{code}\n", stderr="", exit_code=0)
-        if command.startswith("git -C /home/user/repo diff --name-only"):
+        if "npm test" in command:
             return SimpleNamespace(
-                stdout=self.git_stdout,
-                stderr="",
-                exit_code=0,
+                stdout="npm ok" if self.npm_exit == 0 else "npm failed",
+                stderr=self.npm_stderr,
+                exit_code=self.npm_exit,
             )
-        if "python -m pytest" in command or "npm test" in command:
+        if "python -m pytest" in command:
             return SimpleNamespace(
                 stdout="1 passed" if self.pytest_exit == 0 else "1 failed",
                 stderr=self.pytest_stderr,
@@ -356,7 +366,7 @@ def test_relevant_backend_test_files_maps_app_and_tests():
     assert mapped == ["tests/test_harness.py", "tests/test_patcher.py"]
 
 
-def test_full_suite_backend_uses_cwd_env_and_relevant_files():
+def test_full_suite_backend_runs_full_pytest():
     sandbox = _SuiteSandbox(
         existing={
             "/home/user/repo/backend",
@@ -372,29 +382,31 @@ def test_full_suite_backend_uses_cwd_env_and_relevant_files():
     assert len(pytest_cmds) == 1
     command = pytest_cmds[0]
     assert command.startswith("cd /home/user/repo/backend && ")
+    assert command.endswith("python -m pytest -q")
     assert "API_KEY=dev-local-key" in command
     assert "GITHUB_WEBHOOK_SECRET=dev-webhook-secret" in command
-    assert "tests/test_harness.py" in command
+    assert "tests/test_harness.py" not in command
     assert "cd /home/user/repo && python -m pytest -q" not in command
     assert ".env" not in command
+    assert extra_suite_ok(result) is True
+    assert not any("git -C" in c for c in sandbox.ran)
 
 
-def test_full_suite_empty_relevant_tests_skips_pytest():
+def test_full_suite_empty_mapping_still_runs_backend_pytest():
     sandbox = _SuiteSandbox(
         existing={"/home/user/repo/backend"},
         git_stdout="backend/app/services/missing_module.py\n",
     )
     result = run_full_test_suite(sandbox)
-    assert result.exit_code == 0
-    assert result.ran_tests is False
-    assert result.skipped is True
-    assert result.stdout == ADDITIONAL_TESTS_SKIPPED
+    assert result.ran_tests is True
     assert extra_suite_ok(result) is True
-    assert not any("python -m pytest" in c for c in sandbox.ran)
-    assert any(
-        c.startswith("git -C /home/user/repo diff --name-only")
-        for c in sandbox.ran
-    )
+    pytest_cmds = [c for c in sandbox.ran if "python -m pytest" in c]
+    assert pytest_cmds == [
+        "cd /home/user/repo/backend && "
+        "API_KEY=dev-local-key GITHUB_WEBHOOK_SECRET=dev-webhook-secret "
+        "python -m pytest -q"
+    ]
+    assert not any("git -C" in c for c in sandbox.ran)
 
 
 def test_full_suite_without_backend_keeps_repo_root_pytest():
@@ -439,16 +451,85 @@ def test_full_suite_relevant_tests_nonzero_is_not_skipped():
     assert any("python -m pytest" in c for c in sandbox.ran)
 
 
-def test_full_suite_fixture_only_patch_skips_additional_tests():
+def test_full_suite_fixture_only_change_still_runs_backend_pytest():
     sandbox = _SuiteSandbox(
         existing={"/home/user/repo/backend"},
         git_stdout="backend/tests/fixtures/autopatch_phase34.py\n",
     )
     result = run_full_test_suite(sandbox)
-    assert result.skipped is True
-    assert result.ran_tests is False
+    assert result.skipped is False
+    assert result.ran_tests is True
     assert extra_suite_ok(result) is True
+    assert any(c.endswith("python -m pytest -q") for c in sandbox.ran)
+
+
+def test_skipped_suite_is_not_success():
+    skipped = ReproductionResult(
+        exit_code=0,
+        stdout=ADDITIONAL_TESTS_SKIPPED,
+        stderr="",
+        ran_tests=False,
+    )
+    assert extra_suite_ok(skipped) is False
+
+
+def test_full_suite_npm_uses_npm_test_without_if_present():
+    sandbox = _SuiteSandbox(existing={"/home/user/repo/package.json"})
+    result = run_full_test_suite(sandbox)
+    assert result.ran_tests is True
+    assert extra_suite_ok(result) is True
+    npm_cmds = [c for c in sandbox.ran if "npm test" in c]
+    assert npm_cmds == ["cd /home/user/repo && npm test"]
+    assert not any("--if-present" in c for c in sandbox.ran)
     assert not any("python -m pytest" in c for c in sandbox.ran)
+
+
+def test_full_suite_missing_npm_script_is_not_success():
+    sandbox = _SuiteSandbox(
+        existing={"/home/user/repo/package.json"},
+        npm_exit=1,
+        npm_stderr="Missing script: \"test\"",
+    )
+    result = run_full_test_suite(sandbox)
+    assert result.ran_tests is True
+    assert result.exit_code == 1
+    assert extra_suite_ok(result) is False
+    assert any(c == "cd /home/user/repo && npm test" for c in sandbox.ran)
+    assert not any("--if-present" in c for c in sandbox.ran)
+
+
+def test_full_suite_mixed_npm_and_backend_runs_both():
+    sandbox = _SuiteSandbox(
+        existing={
+            "/home/user/repo/package.json",
+            "/home/user/repo/backend",
+        }
+    )
+    result = run_full_test_suite(sandbox)
+    assert result.ran_tests is True
+    assert extra_suite_ok(result) is True
+    assert "cd /home/user/repo && npm test" in sandbox.ran
+    assert any(
+        c.endswith("python -m pytest -q") and "cd /home/user/repo/backend" in c
+        for c in sandbox.ran
+    )
+    assert not any("--if-present" in c for c in sandbox.ran)
+
+
+def test_full_suite_mixed_fails_if_npm_fails():
+    sandbox = _SuiteSandbox(
+        existing={
+            "/home/user/repo/package.json",
+            "/home/user/repo/backend",
+        },
+        npm_exit=1,
+        pytest_exit=0,
+    )
+    result = run_full_test_suite(sandbox)
+    assert extra_suite_ok(result) is False
+    assert result.exit_code == 1
+    assert any("npm test" in c for c in sandbox.ran)
+    assert any("python -m pytest" in c for c in sandbox.ran)
 
 
 def test_extra_suite_merge_message_does_not_claim_tests_passed_when_skipped():
@@ -462,5 +543,6 @@ def test_extra_suite_merge_message_does_not_claim_tests_passed_when_skipped():
     skip_msg = extra_suite_merge_message("owner/repo", skipped)
     assert "no additional project tests were selected" in skip_msg
     assert "all tests passed" not in skip_msg.lower()
+    assert extra_suite_ok(skipped) is False
     assert extra_suite_merge_message("owner/repo", ran) == "owner/repo is green"
     assert extra_suite_ok(None) is False
