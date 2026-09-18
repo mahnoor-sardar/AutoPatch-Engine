@@ -66,3 +66,18 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  web-next-version:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check locked Next.js is outside CVE-2026-44578 range
+        run: node scripts/check-next-version.js

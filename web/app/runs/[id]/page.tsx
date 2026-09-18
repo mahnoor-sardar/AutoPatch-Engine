@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { fetchDiagnosis, fetchRun, fetchRunAudit, fetchRunLogs } from "@/lib/api";
 import { IncidentSummary } from "@/components/diagnosis/IncidentSummary";
 import { EmptyState, ErrorState, Skeleton } from "@/components/layout/States";
@@ -30,7 +31,8 @@ const PatchViewer = dynamic(
 
 const TABS = ["overview", "details", "timeline", "files", "logs"] as const;
 
-export default function RunDetailPage({ params }: { params: { id: string } }) {
+export default function RunDetailPage() {
+  const params = useParams<{ id: string }>();
   const runId = Number(params.id);
   const { runs, events: liveEvents, agentLogs, mergeAgentLogs } = useLive();
   const live = runs.find((run) => run.id === runId);

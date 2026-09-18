@@ -2,18 +2,16 @@
 
 import { useMemo } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { ActivityItem } from "@/components/activity/ActivityItem";
 import { EmptyState } from "@/components/layout/States";
 import { useLive } from "@/components/live/LiveProvider";
 import { RunRow } from "@/components/runs/RunRow";
 import { ownerName, relativeTime } from "@/lib/utils";
 
-export default function RepositoryDetailPage({
-  params,
-}: {
-  params: { slug: string };
-}) {
-  const fullName = decodeURIComponent(params.slug);
+export default function RepositoryDetailPage() {
+  const params = useParams<{ slug: string }>();
+  const fullName = decodeURIComponent(String(params.slug ?? ""));
   const { repos, runs, events } = useLive();
   const meta = repos.find((repo) => repo.full_name === fullName);
   const repoRuns = runs.filter((run) => run.repo === fullName);
