@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -6,7 +8,12 @@ from app.db import get_db
 from app.models import Device, PushEvent
 from app.schemas import DeviceRegister
 from app.services import fcm, totp
-from app.services.audit import ACTOR_ANDROID, RESULT_SUCCESS, log_audit
+from app.services.audit import (
+    ACTOR_ANDROID,
+    ACTOR_HUMAN,
+    RESULT_SUCCESS,
+    log_audit,
+)
 
 router = APIRouter()
 
@@ -21,6 +28,8 @@ router = APIRouter()
 def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
     device = db.query(Device).filter(Device.device_id == body.device_id).one_or_none()
     issued_secret: str | None = None
+    if device is not None and device.revoked_at is not None:
+        raise HTTPException(status_code=403, detail="device revoked")
     if device is None:
         issued_secret = totp.new_secret()
         device = Device(
@@ -60,6 +69,34 @@ def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
 
 
 @router.post(
+    "/v1/devices/{device_id}/revoke",
+    dependencies=[Depends(require_api_key)],
+)
+def revoke_device(device_id: str, db: Session = Depends(get_db)):
+    device = (
+        db.query(Device)
+        .filter(Device.device_id == device_id)
+        .one_or_none()
+    )
+    if device is None:
+        raise HTTPException(status_code=404, detail="device not found")
+    if device.revoked_at is None:
+        device.revoked_at = datetime.now(timezone.utc)
+    log_audit(
+        db,
+        "device_revoke",
+        None,
+        device.device_id,
+        None,
+        actor=ACTOR_HUMAN,
+        result=RESULT_SUCCESS,
+        event_metadata={},
+    )
+    db.commit()
+    return {"ok": True, "device_id": device.device_id}
+
+
+@router.post(
     "/v1/devices/{device_id}/test-push",
     dependencies=[Depends(require_api_key)],
 )
@@ -75,6 +112,8 @@ def test_push(device_id: str, db: Session = Depends(get_db)):
             status_code=404,
             detail="device not found",
         )
+    if device.revoked_at is not None:
+        raise HTTPException(status_code=403, detail="device revoked")
 
     title = "AutoPatch test"
     status = "sent"

@@ -93,7 +93,7 @@ def notify_devices_of_approval_gate(
     if run.current_diff:
         data["has_diff"] = "true"
 
-    for device in db.query(Device).all():
+    for device in db.query(Device).filter(Device.revoked_at.is_(None)).all():
         status = "sent"
         try:
             fcm.send_push_with_timeout(device.fcm_token, title, body, data)

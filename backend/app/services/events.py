@@ -64,7 +64,7 @@ def notify_run_event(
     if extra:
         data.update(extra)
 
-    for device in db.query(Device).all():
+    for device in db.query(Device).filter(Device.revoked_at.is_(None)).all():
         status = "sent"
         try:
             fcm.send_push_with_timeout(device.fcm_token, title, body, data)

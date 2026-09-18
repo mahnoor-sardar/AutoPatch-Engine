@@ -302,6 +302,11 @@ class Device(Base):
         server_default=func.now(),
     )
 
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
 
 class PushEvent(Base):
     __tablename__ = "push_events"

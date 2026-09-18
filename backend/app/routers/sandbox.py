@@ -88,6 +88,8 @@ def _require_device(db: Session, device_id: str) -> Device:
     )
     if device is None or not device.totp_secret:
         raise HTTPException(status_code=404, detail="device not registered")
+    if device.revoked_at is not None:
+        raise HTTPException(status_code=403, detail="device revoked")
     return device
 
 
