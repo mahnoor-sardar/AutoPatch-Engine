@@ -6,7 +6,7 @@ from redis import Redis
 from app.config import settings
 from app.db import get_db
 from app.main import app
-from app.models import Repository
+from app.models import Device, Repository
 from app.workers.celery_app import celery_app
 from app.workers.tasks import clone_and_index
 
@@ -76,22 +76,37 @@ def test_post_sandbox_run_creates_gate_and_publishes_clone_and_index(monkeypatch
         return result
 
     class FakeQuery:
+        def __init__(self, result):
+            self._result = result
+
         def filter(self, *args, **kwargs):
             return self
 
         def one_or_none(self):
-            return Repository(
-                full_name="mahnoor-sardar/AutoPatch-Engine",
-                installation_id=1,
-                default_branch="main",
-            )
+            return self._result
 
         def all(self):
             return []
 
     class FakeDB:
         def query(self, model):
-            return FakeQuery()
+            if model is Device:
+                return FakeQuery(
+                    Device(
+                        device_id="dev-1",
+                        fcm_token="test-fcm",
+                        totp_secret="JBSWY3DPEHPK3PXP",
+                        label="test-approval",
+                        revoked_at=None,
+                    )
+                )
+            return FakeQuery(
+                Repository(
+                    full_name="mahnoor-sardar/AutoPatch-Engine",
+                    installation_id=1,
+                    default_branch="main",
+                )
+            )
 
         def add(self, obj):
             if getattr(obj, "id", None) is None:

@@ -2,9 +2,43 @@ from fastapi.testclient import TestClient
 
 from app.db import get_db
 from app.main import app
-from app.models import Repository
+from app.models import Device, Repository
 
 client = TestClient(app)
+
+_TEST_APPROVAL_DEVICE = Device(
+    device_id="dev-1",
+    fcm_token="test-fcm",
+    totp_secret="JBSWY3DPEHPK3PXP",
+    label="test-approval",
+    revoked_at=None,
+)
+
+
+class _RepoQuery:
+    def filter(self, *args, **kwargs):
+        return self
+
+    def one_or_none(self):
+        return Repository(
+            full_name="mahnoor-sardar/AutoPatch-Engine",
+            installation_id=1,
+            default_branch="main",
+        )
+
+    def all(self):
+        return []
+
+
+class _DeviceQuery:
+    def filter(self, *args, **kwargs):
+        return self
+
+    def one_or_none(self):
+        return _TEST_APPROVAL_DEVICE
+
+    def all(self):
+        return []
 
 
 def test_sandbox_runs_requires_api_key():
@@ -14,23 +48,11 @@ def test_sandbox_runs_requires_api_key():
 
 
 def test_sandbox_run_accepts_stack_trace(monkeypatch):
-    class FakeQuery:
-        def filter(self, *args, **kwargs):
-            return self
-
-        def one_or_none(self):
-            return Repository(
-                full_name="mahnoor-sardar/AutoPatch-Engine",
-                installation_id=1,
-                default_branch="main",
-            )
-
-        def all(self):
-            return []
-
     class FakeDB:
         def query(self, model):
-            return FakeQuery()
+            if model is Device:
+                return _DeviceQuery()
+            return _RepoQuery()
 
         def add(self, obj):
             if hasattr(obj, "id") and obj.id is None:
@@ -81,23 +103,11 @@ def test_create_run_enqueues_clone_and_index(monkeypatch):
     class Result:
         id = "task-test-id"
 
-    class FakeQuery:
-        def filter(self, *args, **kwargs):
-            return self
-
-        def one_or_none(self):
-            return Repository(
-                full_name="mahnoor-sardar/AutoPatch-Engine",
-                installation_id=1,
-                default_branch="main",
-            )
-
-        def all(self):
-            return []
-
     class FakeDB:
         def query(self, model):
-            return FakeQuery()
+            if model is Device:
+                return _DeviceQuery()
+            return _RepoQuery()
 
         def add(self, obj):
             if getattr(obj, "id", None) is None:
