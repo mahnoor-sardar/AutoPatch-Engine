@@ -41,6 +41,7 @@ jobs:
     env:
       APP_ENV: test
       API_KEY: dev-local-key
+      DEVICE_ENROLLMENT_SECRET: dev-enrollment-secret
       GITHUB_WEBHOOK_SECRET: ci-test-webhook-secret
       DATABASE_URL: postgresql+psycopg://autopatch:autopatch@127.0.0.1:5432/autopatch
       REDIS_URL: redis://127.0.0.1:6379/0

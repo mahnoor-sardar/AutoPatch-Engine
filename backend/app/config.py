@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     app_env: str = "local"
 
     api_key: str
+    # Android enrollment only. Never the shared API_KEY. Never NEXT_PUBLIC_*.
+    device_enrollment_secret: str = ""
     database_url: str = (
         "postgresql+psycopg://autopatch:autopatch@localhost:5432/autopatch"
     )

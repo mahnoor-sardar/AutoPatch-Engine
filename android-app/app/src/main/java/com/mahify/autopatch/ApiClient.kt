@@ -85,6 +85,10 @@ object ApiClient {
         return BuildConfig.AUTOPATCH_API_KEY
     }
 
+    private fun enrollmentSecret(): String {
+        return BuildConfig.AUTOPATCH_DEVICE_ENROLLMENT_SECRET
+    }
+
 
     suspend fun registerDevice(
         context: Context,
@@ -116,6 +120,7 @@ object ApiClient {
         val request = Request.Builder()
             .url("$BASE_URL/v1/devices/register")
             .addHeader("X-API-Key", apiKey())
+            .addHeader("X-Device-Enrollment-Secret", enrollmentSecret())
             .post(body)
             .build()
 

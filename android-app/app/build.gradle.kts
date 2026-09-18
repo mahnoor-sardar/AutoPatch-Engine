@@ -18,6 +18,9 @@ if (localPropertiesFile.exists()) {
 val autoPatchApiKey =
     localProperties.getProperty("AUTOPATCH_API_KEY") ?: ""
 
+val deviceEnrollmentSecret =
+    localProperties.getProperty("AUTOPATCH_DEVICE_ENROLLMENT_SECRET") ?: ""
+
 val githubInstallationId =
     localProperties.getProperty("AUTOPATCH_GITHUB_INSTALLATION_ID") ?: ""
 
@@ -46,6 +49,12 @@ android {
             "String",
             "AUTOPATCH_API_KEY",
             "\"$autoPatchApiKey\""
+        )
+
+        buildConfigField(
+            "String",
+            "AUTOPATCH_DEVICE_ENROLLMENT_SECRET",
+            "\"$deviceEnrollmentSecret\""
         )
 
         buildConfigField(

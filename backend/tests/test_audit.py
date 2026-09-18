@@ -253,6 +253,7 @@ def test_log_audit_strips_sensitive_metadata():
                 "totp_secret": "ABCDEF",
                 "approval_token": "abc",
                 "api_key": "secret-key",
+                "enrollment_secret": "enroll-secret",
             },
             commit=True,
         )

@@ -6,7 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, noload
 
-from app.auth import require_api_key
+from app.auth import (
+    issue_ws_ticket,
+    require_api_key,
+    secrets_match,
+    ticket_from_ws_protocols,
+    verify_ws_ticket,
+    ws_subprotocol_for_ticket,
+)
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -817,13 +824,33 @@ def list_runs(
     }
 
 
+@router.get(
+    "/v1/ws/ticket",
+    dependencies=[Depends(require_api_key)],
+)
+def websocket_ticket():
+    ticket, expires_in = issue_ws_ticket()
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
 @router.websocket("/v1/ws/runs")
 async def runs_socket(websocket: WebSocket):
-    api_key = websocket.query_params.get("api_key")
-    if not api_key or api_key != settings.api_key:
+    header_key = websocket.headers.get("x-api-key")
+    ticket = ticket_from_ws_protocols(
+        websocket.headers.get("sec-websocket-protocol")
+    )
+    accept_subprotocol: str | None = None
+    if secrets_match(header_key, settings.api_key):
+        pass
+    elif ticket and verify_ws_ticket(ticket):
+        accept_subprotocol = ws_subprotocol_for_ticket(ticket)
+    else:
         await websocket.close(code=1008)
         return
-    await websocket.accept()
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
     from app.db import SessionLocal
     from app.services.events import subscribe_run_updates
 

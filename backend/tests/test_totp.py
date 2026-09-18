@@ -1,8 +1,10 @@
 import time
 
 import pyotp
+import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.db import SessionLocal
 from app.main import app
 from app.models import Device
@@ -12,6 +14,16 @@ from app.services.totp import new_secret, provisioning_uri, verify_code
 
 client = TestClient(app)
 HEADERS = {"X-API-Key": "dev-local-key"}
+ENROLLMENT_SECRET = "dev-enrollment-secret"
+ENROLL_HEADERS = {
+    "X-API-Key": "dev-local-key",
+    "X-Device-Enrollment-Secret": ENROLLMENT_SECRET,
+}
+
+
+@pytest.fixture(autouse=True)
+def _device_enrollment_secret(monkeypatch):
+    monkeypatch.setattr(settings, "device_enrollment_secret", ENROLLMENT_SECRET)
 
 
 def test_totp_roundtrip():
@@ -78,11 +90,20 @@ def test_dev_totp_setup_requires_api_key():
     assert response.status_code == 401
 
 
+def test_dev_totp_setup_requires_enrollment_secret():
+    response = client.get(
+        "/v1/devices/x/dev/totp-setup",
+        headers=HEADERS,
+    )
+    assert response.status_code == 401
+    assert "secret" not in response.json()
+
+
 def test_dev_totp_setup_hidden_outside_dev_env(monkeypatch):
     monkeypatch.setattr("app.services.totp.settings.app_env", "production")
     response = client.get(
         "/v1/devices/any/dev/totp-setup",
-        headers=HEADERS,
+        headers=ENROLL_HEADERS,
     )
     assert response.status_code == 404
     body = response.json()
@@ -117,7 +138,7 @@ def test_dev_totp_setup_returns_existing_device(monkeypatch):
 
     response = client.get(
         f"/v1/devices/{device_id}/dev/totp-setup",
-        headers=HEADERS,
+        headers=ENROLL_HEADERS,
     )
     assert response.status_code == 200
     body = response.json()
@@ -134,11 +155,20 @@ def test_dev_totp_rotate_requires_api_key():
     assert response.status_code == 401
 
 
+def test_dev_totp_rotate_requires_enrollment_secret():
+    response = client.post(
+        "/v1/devices/x/dev/totp-rotate",
+        headers=HEADERS,
+    )
+    assert response.status_code == 401
+    assert "secret" not in response.json()
+
+
 def test_dev_totp_rotate_hidden_outside_dev_env(monkeypatch):
     monkeypatch.setattr("app.services.totp.settings.app_env", "production")
     response = client.post(
         "/v1/devices/any/dev/totp-rotate",
-        headers=HEADERS,
+        headers=ENROLL_HEADERS,
     )
     assert response.status_code == 404
     body = response.json()
@@ -173,7 +203,7 @@ def test_dev_totp_rotate_replaces_existing_secret(monkeypatch):
 
     response = client.post(
         f"/v1/devices/{device_id}/dev/totp-rotate",
-        headers=HEADERS,
+        headers=ENROLL_HEADERS,
     )
     assert response.status_code == 200
     body = response.json()

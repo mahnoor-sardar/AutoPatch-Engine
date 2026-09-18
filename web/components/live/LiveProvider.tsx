@@ -14,8 +14,9 @@ import {
   fetchHealth,
   fetchRecentAudit,
   fetchRuns,
+  fetchWsTicket,
 } from "@/lib/api";
-import { wsUrl } from "@/lib/config";
+import { wsSubprotocol, wsUrl } from "@/lib/config";
 import type {
   AgentLogChunk,
   AuditEvent,
@@ -186,72 +187,84 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       setSocket((prev) => (prev === "live" ? "live" : "connecting"));
-      const ws = new WebSocket(wsUrl());
-      socketRef = ws;
-      ws.onopen = () => {
-        delayRef.current = 1000;
-        setSocket("live");
-      };
-      ws.onmessage = (message) => {
-        let payload: WsPayload;
-        try {
-          payload = JSON.parse(message.data);
-        } catch {
-          return;
-        }
-        if (payload.event?.type === "agent_log") {
-          const event = payload.event;
-          const runId = event.run_id;
-          const chunk = event.chunk;
-          if (runId != null && chunk) {
-            setAgentLogs((prev) =>
-              appendLog(prev, {
-                run_id: runId,
-                stream: event.stream === "stderr" ? "stderr" : "stdout",
-                chunk,
-              })
-            );
-          }
-          return;
-        }
-        if (Array.isArray(payload.runs)) {
-          setRuns((prev) => {
-            const next = mergeRuns(prev, payload.runs || []);
-            return payload.event ? applyEventToRuns(next, payload.event) : next;
-          });
-        } else if (payload.event) {
-          setRuns((prev) => applyEventToRuns(prev, payload.event!));
-        }
-        if (payload.event) {
-          const event = payload.event;
-          setLatestTitle(event.title || null);
-          setEvents((prev) => {
-            const next: AuditEvent = {
-              id: ephemeralId,
-              run_id: event.run_id ?? null,
-              action: event.title || event.type || "event",
-              detail: event.body || null,
-              actor: "system",
-              result: "success",
-              created_at: new Date().toISOString(),
-              repository:
-                payload.runs?.find((run) => run.id === event.run_id)?.repo ?? null,
-            };
-            ephemeralId -= 1;
-            return [next, ...prev.filter((item) => item.id !== next.id)].slice(
-              0,
-              400
-            );
-          });
-        }
-      };
-      ws.onclose = () => {
-        if (closed) return;
-        socketRef = null;
-        setSocket("reconnecting");
-        timer = setTimeout(connect, delayRef.current);
-        delayRef.current = Math.min(delayRef.current * 2, 15000);
-      };
+      void fetchWsTicket()
+        .then((issued) => {
+          if (closed) return;
+          const ws = new WebSocket(wsUrl(), [wsSubprotocol(issued.ticket)]);
+          socketRef = ws;
+          ws.onopen = () => {
+            delayRef.current = 1000;
+            setSocket("live");
+          };
+          ws.onmessage = (message) => {
+            let payload: WsPayload;
+            try {
+              payload = JSON.parse(message.data);
+            } catch {
+              return;
+            }
+            if (payload.event?.type === "agent_log") {
+              const event = payload.event;
+              const runId = event.run_id;
+              const chunk = event.chunk;
+              if (runId != null && chunk) {
+                setAgentLogs((prev) =>
+                  appendLog(prev, {
+                    run_id: runId,
+                    stream: event.stream === "stderr" ? "stderr" : "stdout",
+                    chunk,
+                  })
+                );
+              }
+              return;
+            }
+            if (Array.isArray(payload.runs)) {
+              setRuns((prev) => {
+                const next = mergeRuns(prev, payload.runs || []);
+                return payload.event ? applyEventToRuns(next, payload.event) : next;
+              });
+            } else if (payload.event) {
+              setRuns((prev) => applyEventToRuns(prev, payload.event!));
+            }
+            if (payload.event) {
+              const event = payload.event;
+              setLatestTitle(event.title || null);
+              setEvents((prev) => {
+                const next: AuditEvent = {
+                  id: ephemeralId,
+                  run_id: event.run_id ?? null,
+                  action: event.title || event.type || "event",
+                  detail: event.body || null,
+                  actor: "system",
+                  result: "success",
+                  created_at: new Date().toISOString(),
+                  repository:
+                    payload.runs?.find((run) => run.id === event.run_id)?.repo ??
+                    null,
+                };
+                ephemeralId -= 1;
+                return [next, ...prev.filter((item) => item.id !== next.id)].slice(
+                  0,
+                  400
+                );
+              });
+            }
+          };
+          ws.onclose = () => {
+            if (closed) return;
+            socketRef = null;
+            setSocket("reconnecting");
+            timer = setTimeout(connect, delayRef.current);
+            delayRef.current = Math.min(delayRef.current * 2, 15000);
+          };
+        })
+        .catch(() => {
+          if (closed) return;
+          socketRef = null;
+          setSocket("reconnecting");
+          timer = setTimeout(connect, delayRef.current);
+          delayRef.current = Math.min(delayRef.current * 2, 15000);
+        });
     };
 
     connect();

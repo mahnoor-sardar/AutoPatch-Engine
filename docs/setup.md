@@ -58,13 +58,13 @@ npm install
 npm run dev
 ```
 
-Opens the AutoPatch console (`http://localhost:3000`). It calls `GET /health`, sandbox run/audit APIs, `GET /v1/github/connected`, and connects to `WS /v1/ws/runs` with `NEXT_PUBLIC_API_KEY`.
+Opens the AutoPatch console (`http://localhost:3000`). Give the Next.js process the same server-only `API_KEY` as the backend (for example `web/.env.local`). The browser does not receive that key. The console calls `GET /health`, sandbox run/audit APIs, `GET /v1/github/connected`, and `GET /v1/ws/ticket`, then connects to `WS /v1/ws/runs` with a short-lived ticket subprotocol. `NEXT_PUBLIC_API_URL` is only the backend origin for the WebSocket host and display.
 
 ## Android
 
 1. Copy `android-app/app/google-services.json.example` to `android-app/app/google-services.json` and replace with your Firebase Android app file.
 2. Open `android-app/` in Android Studio, sync Gradle, run on a device/emulator with Play services.
-3. Register the device against `http://<lan-ip>:8000` (not `localhost` on a physical phone).
+3. Register the device against `http://<lan-ip>:8000` (not `localhost` on a physical phone). Set `AUTOPATCH_DEVICE_ENROLLMENT_SECRET` in `android-app/local.properties` to the same value as `DEVICE_ENROLLMENT_SECRET` in `.env`. That enrollment secret is not `API_KEY` and must not be placed in `NEXT_PUBLIC_*`.
 4. Use **Send test push** or `POST /v1/devices/{device_id}/test-push` with header `X-API-Key`.
 
 ## Suggested Weeks 1–2 order

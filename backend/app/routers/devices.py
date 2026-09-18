@@ -1,42 +1,62 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.auth import require_api_key
+from app.auth import require_api_key, require_device_enrollment
 from app.db import get_db
 from app.models import Device, PushEvent
 from app.schemas import DeviceRegister
 from app.services import fcm, totp
+from app.services.audit import ACTOR_ANDROID, RESULT_SUCCESS, log_audit
 
 router = APIRouter()
 
 
 @router.post(
     "/v1/devices/register",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[
+        Depends(require_api_key),
+        Depends(require_device_enrollment),
+    ],
 )
 def register_device(body: DeviceRegister, db: Session = Depends(get_db)):
     device = db.query(Device).filter(Device.device_id == body.device_id).one_or_none()
+    issued_secret: str | None = None
     if device is None:
+        issued_secret = totp.new_secret()
         device = Device(
             device_id=body.device_id,
             fcm_token=body.fcm_token,
             label=body.label,
-            totp_secret=totp.new_secret(),
+            totp_secret=issued_secret,
         )
         db.add(device)
     else:
         device.fcm_token = body.fcm_token
         device.label = body.label
         if not device.totp_secret:
-            device.totp_secret = totp.new_secret()
+            issued_secret = totp.new_secret()
+            device.totp_secret = issued_secret
+    log_audit(
+        db,
+        "device_register",
+        None,
+        device.device_id,
+        "enrolled" if issued_secret else "updated",
+        actor=ACTOR_ANDROID,
+        result=RESULT_SUCCESS,
+        event_metadata={"secret_issued": bool(issued_secret)},
+    )
     db.commit()
-    # totp_secret is returned once for on-device encrypted storage.
+    # totp_secret is returned once, only for a newly issued secret.
+    # Re-registration must not disclose an existing device TOTP.
     # Do not log this body. Production Android UI must not display it.
-    return {
+    payload = {
         "ok": True,
         "device_id": device.device_id,
-        "totp_secret": device.totp_secret,
     }
+    if issued_secret:
+        payload["totp_secret"] = issued_secret
+    return payload
 
 
 @router.post(
@@ -102,7 +122,10 @@ def _require_dev_totp_device(db: Session, device_id: str) -> Device:
 
 @router.get(
     "/v1/devices/{device_id}/dev/totp-setup",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[
+        Depends(require_api_key),
+        Depends(require_device_enrollment),
+    ],
 )
 def dev_totp_setup(device_id: str, db: Session = Depends(get_db)):
     """DEV/TEST only. Hidden unless APP_ENV is local/dev/test.
@@ -126,7 +149,10 @@ def dev_totp_setup(device_id: str, db: Session = Depends(get_db)):
 
 @router.post(
     "/v1/devices/{device_id}/dev/totp-rotate",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[
+        Depends(require_api_key),
+        Depends(require_device_enrollment),
+    ],
 )
 def dev_totp_rotate(device_id: str, db: Session = Depends(get_db)):
     """DEV/TEST only. Replace an existing device TOTP secret.

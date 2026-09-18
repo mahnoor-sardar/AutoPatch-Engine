@@ -227,7 +227,10 @@ def test_websocket_delivers_agent_log_without_requiring_runs(monkeypatch):
         "app.services.events.subscribe_run_updates",
         fake_subscribe,
     )
-    with client.websocket_connect("/v1/ws/runs?api_key=dev-local-key") as ws:
+    with client.websocket_connect(
+        "/v1/ws/runs",
+        headers={"X-API-Key": "dev-local-key"},
+    ) as ws:
         first = ws.receive_json()
         assert "runs" in first
         second = ws.receive_json()

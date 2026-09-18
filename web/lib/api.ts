@@ -23,7 +23,7 @@ async function getJson<T>(path: string, withAuth = true): Promise<T> {
     if (!response.ok) {
       if (response.status === 401) {
         throw new Error(
-          "Unauthorized. Set NEXT_PUBLIC_API_KEY to the same value as the backend API key."
+          "Unauthorized. Confirm the Next.js server has API_KEY set to the same value as the backend."
         );
       }
       throw new Error(`${response.status} ${response.statusText}`);
@@ -78,4 +78,8 @@ export function fetchConnectedRepos() {
   return getJson<{ repositories: ConnectedRepository[] }>(
     "/v1/github/connected"
   );
+}
+
+export function fetchWsTicket() {
+  return getJson<{ ticket: string; expires_in: number }>("/v1/ws/ticket");
 }

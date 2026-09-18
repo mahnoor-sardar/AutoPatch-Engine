@@ -142,6 +142,8 @@ _SENSITIVE_META_KEYS = frozenset(
         "token",
         "token_ts",
         "api_key",
+        "enrollment_secret",
+        "device_enrollment_secret",
         "secret",
         "password",
         "authorization",

@@ -34,7 +34,10 @@ def test_serialize_runs_includes_status_and_diff():
 
 def test_websocket_rejects_bad_key():
     try:
-        with client.websocket_connect("/v1/ws/runs?api_key=wrong"):
+        with client.websocket_connect(
+            "/v1/ws/runs",
+            headers={"X-API-Key": "wrong"},
+        ):
             raise AssertionError("should have closed")
     except Exception:
         return
@@ -71,7 +74,10 @@ def test_websocket_pushes_on_redis_message(monkeypatch):
         "app.services.events.subscribe_run_updates",
         fake_subscribe,
     )
-    with client.websocket_connect("/v1/ws/runs?api_key=dev-local-key") as ws:
+    with client.websocket_connect(
+        "/v1/ws/runs",
+        headers={"X-API-Key": "dev-local-key"},
+    ) as ws:
         first = ws.receive_json()
         assert "runs" in first
         second = ws.receive_json()
