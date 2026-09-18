@@ -61,50 +61,92 @@ def make_app_jwt() -> str:
     )
 
 
+PERMISSIONS_REPO_READ = {"contents": "read"}
+PERMISSIONS_PR_WRITE = {"contents": "write", "pull_requests": "write"}
+
+_TOKEN_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+
+def _repository_name(owner_repo: str) -> str:
+    parts = (owner_repo or "").strip().strip("/").split("/")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("repository scope is required")
+    return parts[1]
+
+
+def _scoped_token_payload(
+    permissions: dict[str, str] | None,
+    repositories: list[str] | None,
+) -> dict:
+    if not permissions:
+        raise ValueError("installation token permissions are required")
+    if not repositories:
+        raise ValueError("installation token repository scope is required")
+    names = [name.strip() for name in repositories if str(name).strip()]
+    if not names:
+        raise ValueError("installation token repository scope is required")
+    return {
+        "permissions": dict(permissions),
+        "repositories": names,
+    }
+
+
+def _installation_access_tokens_url(installation_id: int) -> str:
+    return (
+        "https://api.github.com"
+        f"/app/installations/{installation_id}/access_tokens"
+    )
+
+
 async def get_installation_token(installation_id: int) -> str:
     token = make_app_jwt()
-
-    url = (
-        "https://api.github.com"
-        f"/app/installations/{installation_id}/access_tokens"
-    )
-
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            url,
+            _installation_access_tokens_url(installation_id),
             headers={
                 "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                **_TOKEN_HEADERS,
             },
         )
-
     response.raise_for_status()
-
     return response.json()["token"]
 
 
-def get_installation_token_sync(installation_id: int) -> str:
-    token = make_app_jwt()
-
-    url = (
-        "https://api.github.com"
-        f"/app/installations/{installation_id}/access_tokens"
-    )
-
+def get_installation_token_sync(
+    installation_id: int,
+    *,
+    permissions: dict[str, str],
+    repositories: list[str],
+) -> str:
+    payload = _scoped_token_payload(permissions, repositories)
+    app_jwt = make_app_jwt()
     with httpx.Client(timeout=30) as client:
         response = client.post(
-            url,
+            _installation_access_tokens_url(installation_id),
             headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "Authorization": f"Bearer {app_jwt}",
+                **_TOKEN_HEADERS,
             },
+            json=payload,
         )
-
     response.raise_for_status()
-
     return response.json()["token"]
+
+
+def installation_token_for_repo(
+    installation_id: int,
+    owner_repo: str,
+    permissions: dict[str, str],
+) -> str:
+    """Mint a repo-scoped installation token. Never omits permissions or scope."""
+    return get_installation_token_sync(
+        installation_id,
+        permissions=permissions,
+        repositories=[_repository_name(owner_repo)],
+    )
 
 
 def clone_url(owner_repo: str) -> str:

@@ -130,6 +130,32 @@ def create_sandbox() -> Sandbox:
     return session.raw
 
 
+_CLONE_URL = re.compile(
+    r"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$"
+)
+
+
+def _git_bearer_header_opt(token: str) -> str:
+    if not token or "\n" in token or "\r" in token:
+        raise ValueError("invalid github token")
+    return "-c http.extraHeader=" + shlex.quote(f"Authorization: Bearer {token}")
+
+
+def _assert_tokenless_origin(origin: str, expected_url: str, token: str) -> None:
+    value = (origin or "").strip()
+    lowered = value.lower()
+    if (
+        value != expected_url
+        or "x-access-token" in lowered
+        or "authorization" in lowered
+        or "ghs_" in value
+        or "ghp_" in value
+        or "github_pat_" in value
+        or (token and token in value)
+    ):
+        raise RuntimeError("git remote origin must not contain credentials")
+
+
 def clone_and_read_sources(
     sandbox: Sandbox,
     clone_url: str,
@@ -138,21 +164,34 @@ def clone_and_read_sources(
 ) -> dict[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", ref):
         raise ValueError("invalid git ref")
+    if not _CLONE_URL.fullmatch(clone_url):
+        raise ValueError("invalid clone url")
 
     safe_ref = shlex.quote(ref)
-    safe_token = shlex.quote(token)
-    repository_path = clone_url.removeprefix("https://github.com/")
-
+    safe_url = shlex.quote(clone_url)
+    header_opt = _git_bearer_header_opt(token)
     clone_command = (
-        "git clone --depth 1 "
-        f"--branch {safe_ref} "
-        f"https://x-access-token:{safe_token}@github.com/"
-        f"{repository_path} "
-        "/home/user/repo"
+        f"git {header_opt} clone --depth 1 "
+        f"--branch {safe_ref} {safe_url} /home/user/repo"
     )
 
     try:
         _run(sandbox, clone_command, COMMAND_TIMEOUT)
+        _run(
+            sandbox,
+            "git -C /home/user/repo remote set-url origin " + safe_url,
+            30,
+        )
+        origin = _run(
+            sandbox,
+            "git -C /home/user/repo config --get remote.origin.url",
+            30,
+        )
+        _assert_tokenless_origin(
+            getattr(origin, "stdout", None) or "",
+            clone_url,
+            token,
+        )
     except Exception as exc:
         details = str(exc)
         for attr in ("stdout", "stderr", "exit_code"):
@@ -265,3 +304,16 @@ def install_project_dependencies(sandbox: Sandbox) -> tuple[int, str, str]:
             getattr(exc, "stdout", "") or "",
             getattr(exc, "stderr", "") or str(exc),
         )
+
+
+def push_branch(sandbox, branch: str, token: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+        raise ValueError("invalid git branch")
+    header_opt = _git_bearer_header_opt(token)
+    safe_branch = shlex.quote(branch)
+    _run(
+        sandbox,
+        "cd /home/user/repo && "
+        f"git {header_opt} push origin {safe_branch}",
+        COMMAND_TIMEOUT,
+    )

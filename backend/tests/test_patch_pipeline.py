@@ -119,8 +119,8 @@ def test_reproduced_bug_without_llm_does_not_complete(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_reproduction_test",
@@ -159,8 +159,8 @@ def test_reproduced_bug_with_diff_awaits_review(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_reproduction_test",
@@ -206,8 +206,8 @@ def _stub_repro_pipeline(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_reproduction_test",
@@ -313,8 +313,8 @@ def test_stop_after_repro_never_calls_generate_patch(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_reproduction_test",
@@ -384,8 +384,8 @@ def test_patch_retry_stops_at_max_attempts(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr(
         "app.workers.tasks.run_reproduction_test",
@@ -480,8 +480,8 @@ def _stub_apply_verify(monkeypatch):
         lambda sandbox: (0, "", ""),
     )
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
     monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
     monkeypatch.setattr(

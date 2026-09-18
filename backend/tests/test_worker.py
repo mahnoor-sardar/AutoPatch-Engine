@@ -121,8 +121,8 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "app.workers.tasks.get_installation_token_sync",
-        lambda installation_id: "test-token",
+        "app.workers.tasks.installation_token_for_repo",
+        lambda *args, **kwargs: "test-token",
     )
 
     monkeypatch.setattr(

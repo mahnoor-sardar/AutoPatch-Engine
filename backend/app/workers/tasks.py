@@ -36,8 +36,10 @@ from app.services.diagnostic import locate_frames
 from app.services.embeddings import store_symbol_embeddings
 from app.services.events import notify_run_event
 from app.services.github_app import (
+    PERMISSIONS_PR_WRITE,
+    PERMISSIONS_REPO_READ,
     clone_url,
-    get_installation_token_sync,
+    installation_token_for_repo,
 )
 from app.services.gemini import diagnose_reproduction
 from app.services.github_pr import create_pull_request
@@ -500,7 +502,11 @@ def clone_and_index(run_id: int) -> None:
             .filter(Repository.full_name == run.repo)
             .one()
         )
-        token = get_installation_token_sync(repo.installation_id)
+        token = installation_token_for_repo(
+            repo.installation_id,
+            run.repo,
+            PERMISSIONS_REPO_READ,
+        )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
@@ -774,7 +780,11 @@ def apply_patch_and_verify(run_id: int) -> None:
             .filter(Repository.full_name == run.repo)
             .one()
         )
-        token = get_installation_token_sync(repo.installation_id)
+        token = installation_token_for_repo(
+            repo.installation_id,
+            run.repo,
+            PERMISSIONS_REPO_READ,
+        )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
@@ -911,13 +921,17 @@ def open_github_pr(run_id: int) -> None:
             .filter(Repository.full_name == run.repo)
             .one()
         )
-        token = get_installation_token_sync(repo.installation_id)
-        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
+        read_token = installation_token_for_repo(
+            repo.installation_id,
+            run.repo,
+            PERMISSIONS_REPO_READ,
+        )
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, read_token))
         branch = f"autopatch/run-{run.id}"
         sandbox, _files = e2b_runner.clone_and_read_sources_in_sandbox(
             clone_url=clone_url(run.repo),
             ref=run.ref,
-            token=token,
+            token=read_token,
         )
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
@@ -932,12 +946,18 @@ def open_github_pr(run_id: int) -> None:
             "git config user.name AutoPatch && "
             f"git checkout -b {branch} && "
             "git add -A && "
-            "git commit -m 'fix: verified autopatch' && "
-            f"git push origin {branch}",
+            "git commit -m 'fix: verified autopatch'",
             120,
         )
+        write_token = installation_token_for_repo(
+            repo.installation_id,
+            run.repo,
+            PERMISSIONS_PR_WRITE,
+        )
+        log_stack.enter_context(e2b_runner.agent_log_scope(run.id, write_token))
+        e2b_runner.push_branch(sandbox, branch, write_token)
         pr = create_pull_request(
-            token=token,
+            token=write_token,
             repo=run.repo,
             title=f"AutoPatch: verified fix for run {run.id}",
             body="Verified reproduction and tests. Android merge OTP approved.",

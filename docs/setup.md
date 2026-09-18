@@ -48,7 +48,9 @@ pytest
 
 ## GitHub App (webhook step)
 
-Create a GitHub App with **Contents: Read** and **Metadata: Read**. Subscribe to `installation` (and optionally `push`). Set the webhook URL to `https://<tunnel>/v1/github/webhook`. Install it on a private test repo. Put App ID, webhook secret, and PEM path in `.env`.
+Create a GitHub App with **Contents: Read**, **Pull requests: Write**, **Contents: Write**, and **Metadata: Read**. Subscribe to `installation` (and optionally `push`). Set the webhook URL to `https://<tunnel>/v1/github/webhook`. Install it on a private test repo. Put App ID, webhook secret, and PEM path in `.env`.
+
+Pre-merge clone, install, and tests mint a **repository-scoped Contents: Read** installation token and authenticate Git with a command-local HTTP header. That token is not stored in `remote.origin.url`. PR publication happens only after the Android **merge** gate and uses a **separate** repository-scoped token with Contents: Write and Pull requests: Write, also command-local for `git push`. Write credentials must not be available to repository execution before merge approval.
 
 ## Web
 
