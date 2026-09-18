@@ -234,6 +234,32 @@ def test_generate_patch_includes_clipped_sanitized_diagnosis(monkeypatch):
     assert "tools" not in seen[0]
 
 
+def test_generate_patch_sanitizes_prompt_fields(monkeypatch):
+    _enable_llm(monkeypatch)
+    seen = []
+
+    def fake_completion(**kwargs):
+        seen.append(kwargs)
+        return _completion(_message(content=VALID_DIFF))
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    generate_patch(
+        path="app/math.py",
+        source='api_key=source-secret-value\nprint("ok")\n',
+        test_source='{"api_key":"test-secret-value"}',
+        stderr="Authorization: Bearer stderr-secret-token",
+        exception_type="ValueError",
+        previous_error='{"secret": "previous-secret-value"}',
+    )
+    prompt = seen[0]["messages"][0]["content"]
+    assert "source-secret-value" not in prompt
+    assert "test-secret-value" not in prompt
+    assert "stderr-secret-token" not in prompt
+    assert "previous-secret-value" not in prompt
+    assert "[REDACTED]" in prompt
+    assert "Authorization: Bearer [REDACTED]" in prompt
+
+
 def test_read_file_sanitizes_secrets():
     files = {"app/secrets.py": "api_key=super-secret-value\n"}
     result = run_read_file_tool(files, "app/secrets.py")

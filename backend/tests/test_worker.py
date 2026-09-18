@@ -8,7 +8,7 @@ from app.models import (
     Repository,
     SandboxRun,
 )
-from app.workers.tasks import clone_and_index
+from app.workers.tasks import _clip_verify_output, clone_and_index
 
 
 STACK_TRACE = """Traceback (most recent call last):
@@ -177,5 +177,39 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
 
         assert "calculate()" in attempt.test_source
 
+    finally:
+        db.close()
+
+
+def test_clip_verify_output_sanitizes_before_persist():
+    raw = (
+        'failed {"api_key":"verify-secret-value"} '
+        "Authorization: Bearer ordinary-secret-token"
+    )
+    cleaned = _clip_verify_output(raw)
+    assert "verify-secret-value" not in cleaned
+    assert "ordinary-secret-token" not in cleaned
+    assert "[REDACTED]" in cleaned
+
+    db = SessionLocal()
+    try:
+        run = SandboxRun(status="failed", repo="a/b", ref="main")
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        attempt = ReproductionAttempt(
+            run_id=run.id,
+            stack_trace="Error",
+            stdout=_clip_verify_output('api_key=stored-stdout-secret'),
+            stderr=_clip_verify_output('{"secret": "stored-stderr-secret"}'),
+            reproduced=False,
+        )
+        db.add(attempt)
+        db.commit()
+        db.refresh(attempt)
+        assert "stored-stdout-secret" not in (attempt.stdout or "")
+        assert "stored-stderr-secret" not in (attempt.stderr or "")
+        assert "[REDACTED]" in attempt.stdout
+        assert "[REDACTED]" in attempt.stderr
     finally:
         db.close()

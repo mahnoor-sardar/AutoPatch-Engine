@@ -21,9 +21,18 @@ logger = logging.getLogger(__name__)
 _agent_log_run_id: ContextVar[int | None] = ContextVar("agent_log_run_id", default=None)
 _agent_log_token: ContextVar[str] = ContextVar("agent_log_token", default="")
 
+_BEARER_HEADER = re.compile(
+    r"(?i)(\bAuthorization\s*:\s*Bearer\s+)(\S+)"
+)
 _SECRET_ASSIGN = re.compile(
-    r"(?i)(api[_-]?key|access[_-]?token|secret|password|authorization|bearer)"
-    r"([=:\s]+)(\S+)"
+    r"(?i)("
+    r"[\"'](?:api[_-]?key|access[_-]?token|secret|password|authorization)[\"']"
+    r"|"
+    r"(?:api[_-]?key|access[_-]?token|secret|password)"
+    r")"
+    r"(\s*[=:]\s*)"
+    r"([\"']?)"
+    r"([^\s\"',}\\]+)"
 )
 
 
@@ -40,7 +49,8 @@ def sanitize_log_text(text: str, token: str = "") -> str:
         "https://github.com/",
         text,
     )
-    text = _SECRET_ASSIGN.sub(r"\1\2[REDACTED]", text)
+    text = _BEARER_HEADER.sub(r"\1[REDACTED]", text)
+    text = _SECRET_ASSIGN.sub(r"\1\2\3[REDACTED]", text)
     return text
 
 
@@ -55,8 +65,13 @@ def agent_log_scope(run_id: int, token: str = ""):
     try:
         yield
     finally:
-        _agent_log_run_id.reset(rid)
-        _agent_log_token.reset(tok)
+        from app.services.events import flush_agent_logs
+
+        try:
+            flush_agent_logs(run_id, token or "")
+        finally:
+            _agent_log_run_id.reset(rid)
+            _agent_log_token.reset(tok)
 
 
 def _emit_agent_log(stream: str, chunk: str) -> None:

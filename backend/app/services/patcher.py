@@ -413,6 +413,10 @@ def generate_patch(
 
     snapshot = _bounded_files(files)
     diagnosis_text = _clip_diagnosis(diagnosis)
+    test_source = sanitize_log_text(test_source or "")
+    stderr = sanitize_log_text(stderr or "")
+    previous_error = sanitize_log_text(previous_error or "")
+    source = sanitize_log_text(source or "")
     prompt = (
         "You are AutoPatch Engine. Return ONLY a unified git diff that "
         "fixes the bug. Do not wrap in markdown.\n\n"
@@ -420,7 +424,7 @@ def generate_patch(
         f"Exception: {exception_type}\n"
         f"Test:\n{test_source}\n\n"
         f"Stderr:\n{stderr}\n\n"
-        f"Previous error:\n{previous_error or ''}\n\n"
+        f"Previous error:\n{previous_error}\n\n"
     )
     if diagnosis_text:
         prompt += f"Diagnosis:\n{diagnosis_text}\n\n"

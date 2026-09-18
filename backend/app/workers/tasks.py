@@ -316,7 +316,7 @@ def _control_or_stop(db, run: SandboxRun) -> bool:
 
 
 def _clip_verify_output(text: str, limit: int = VERIFY_OUTPUT_LIMIT) -> str:
-    text = text or ""
+    text = e2b_runner.sanitize_log_text(text or "")
     if len(text) <= limit:
         return text
     return text[:limit] + "\n...[truncated]"
@@ -466,7 +466,7 @@ def _verification_failure(*, apply_err: str, suite, full) -> str:
             parts.append(stderr)
         return "\n".join(parts).strip()
     if suite is not None and suite.stderr:
-        return suite.stderr
+        return _clip_verify_output(suite.stderr)
     return ""
 
 

@@ -1,6 +1,7 @@
 import httpx
 
 from app.config import settings
+from app.services.e2b_runner import sanitize_log_text
 
 GEMINI_API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -45,7 +46,7 @@ _MAX_CONTEXT_CHARS = 4000
 
 
 def _clip(text: str | None) -> str:
-    value = text or ""
+    value = sanitize_log_text(text or "")
     if len(value) <= _MAX_CONTEXT_CHARS:
         return value
     return value[:_MAX_CONTEXT_CHARS] + "\n...[truncated]"

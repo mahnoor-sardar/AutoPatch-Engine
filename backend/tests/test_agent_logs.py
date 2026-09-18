@@ -12,7 +12,7 @@ from app.services.e2b_runner import (
     run_sandbox_command,
     sanitize_log_text,
 )
-from app.services.events import RUN_CHANNEL, publish_agent_log
+from app.services.events import RUN_CHANNEL, flush_agent_logs, publish_agent_log
 from app.services.harness import _run_command
 
 
@@ -34,6 +34,27 @@ def test_sanitize_log_redacts_github_token_and_clone_url():
     assert "x-access-token:" not in cleaned
     assert "[REDACTED]" in cleaned
     assert "https://github.com/" in cleaned
+
+
+def test_sanitize_log_redacts_json_and_bearer():
+    json_compact = '{"api_key":"super-secret"}'
+    json_spaced = '{"secret": "another-secret"}'
+    bearer = "Authorization: Bearer ordinary-secret-token"
+    json_auth = '{"authorization": "abc123"}'
+    compact = sanitize_log_text(json_compact)
+    spaced = sanitize_log_text(json_spaced)
+    header = sanitize_log_text(bearer)
+    auth_json = sanitize_log_text(json_auth)
+    assert "super-secret" not in compact
+    assert "[REDACTED]" in compact
+    assert "another-secret" not in spaced
+    assert "[REDACTED]" in spaced
+    assert "ordinary-secret-token" not in header
+    assert "Authorization: Bearer [REDACTED]" in header
+    assert "abc123" not in auth_json
+    assigned = sanitize_log_text("api_key=super-secret-value")
+    assert "super-secret-value" not in assigned
+    assert "api_key=[REDACTED]" in assigned
 
 
 def test_publish_agent_log_does_not_call_fcm(monkeypatch):
@@ -82,9 +103,46 @@ def test_publish_agent_log_redacts_token(monkeypatch):
             return FakeRedis()
 
     monkeypatch.setattr("app.services.events.Redis", FakeFactory)
-    publish_agent_log(1, "stderr", "using ghs_abcdefghijklmnopqrstuv", token="")
+    publish_agent_log(1, "stderr", "using ghs_abcdefghijklmnopqrstuv\n", token="")
     assert "[REDACTED_GITHUB_TOKEN]" in seen[0]["chunk"]
     assert "ghs_" not in seen[0]["chunk"]
+
+
+def test_publish_agent_log_redacts_json_bearer_and_split_chunks(monkeypatch):
+    seen = []
+
+    class FakeRedis:
+        def publish(self, channel, body):
+            seen.append(json.loads(body))
+
+        def close(self):
+            return None
+
+    class FakeFactory:
+        @staticmethod
+        def from_url(url, **kwargs):
+            return FakeRedis()
+
+    monkeypatch.setattr("app.services.events.Redis", FakeFactory)
+
+    publish_agent_log(21, "stdout", '{"api_key":"super-secret"}\n', token="")
+    publish_agent_log(21, "stdout", '{"secret": "another-secret"}\n', token="")
+    publish_agent_log(
+        21, "stderr", "Authorization: Bearer ordinary-secret-token\n", token=""
+    )
+    publish_agent_log(22, "stdout", "api_key=super-", token="")
+    publish_agent_log(22, "stdout", "secret-value", token="")
+    flush_agent_logs(22, token="")
+
+    published = "".join(item["chunk"] for item in seen if item.get("run_id") == 21)
+    split = "".join(item["chunk"] for item in seen if item.get("run_id") == 22)
+    assert "super-secret" not in published
+    assert "another-secret" not in published
+    assert "ordinary-secret-token" not in published
+    assert "Authorization: Bearer [REDACTED]" in published
+    assert "super-secret-value" not in split
+    assert "api_key=[REDACTED]" in split
+    assert all(item["type"] == "agent_log" for item in seen)
 
 
 def test_run_sandbox_command_streams_stdout_and_stderr(monkeypatch):

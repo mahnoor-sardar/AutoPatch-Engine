@@ -141,3 +141,30 @@ def test_diagnose_reproduction_clips_long_source(monkeypatch):
     )
     assert "[truncated]" in seen["prompt"]
     assert len(seen["prompt"]) < 9000
+
+
+def test_diagnose_reproduction_sanitizes_model_inputs(monkeypatch):
+    seen = {}
+
+    def fake_generate_text(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "ok"
+
+    monkeypatch.setattr("app.services.gemini.generate_text", fake_generate_text)
+    diagnose_reproduction(
+        path="a.py",
+        name="fn",
+        line=1,
+        exception_type="Error",
+        source='password=source-secret-value\n',
+        test_source='{"api_key":"test-secret-value"}',
+        stderr="Authorization: Bearer stderr-secret-token",
+        stack_trace='{"secret": "stack-secret-value"}',
+    )
+    prompt = seen["prompt"]
+    assert "source-secret-value" not in prompt
+    assert "test-secret-value" not in prompt
+    assert "stderr-secret-token" not in prompt
+    assert "stack-secret-value" not in prompt
+    assert "[REDACTED]" in prompt
+    assert "Authorization: Bearer [REDACTED]" in prompt
