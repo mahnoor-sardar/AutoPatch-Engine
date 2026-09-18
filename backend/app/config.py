@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     api_key: str
     # Android enrollment only. Never the shared API_KEY. Never NEXT_PUBLIC_*.
     device_enrollment_secret: str = ""
+    # Server-only. Device authorized to approve pending gates. Never NEXT_PUBLIC_*.
+    approval_device_id: str | None = None
     database_url: str = (
         "postgresql+psycopg://autopatch:autopatch@localhost:5432/autopatch"
     )

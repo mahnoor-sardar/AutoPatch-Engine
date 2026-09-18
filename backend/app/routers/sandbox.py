@@ -3,7 +3,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session, noload
 
 from app.auth import (
@@ -37,6 +37,7 @@ from app.services.approval import (
     STAGE_PATCH_REVIEW,
     STAGE_PR,
     STAGE_PROVISION,
+    ApprovalDeviceUnavailable,
     apply_gate_expiry,
     create_pending_gate,
     create_pending_provision_gate,
@@ -91,6 +92,26 @@ def _require_device(db: Session, device_id: str) -> Device:
     if device.revoked_at is not None:
         raise HTTPException(status_code=403, detail="device revoked")
     return device
+
+
+def _require_gate_device(gate: ApprovalGate, device_id: str) -> None:
+    if not gate.device_id or gate.device_id != device_id:
+        raise HTTPException(
+            status_code=403,
+            detail="device is not authorized for this gate",
+        )
+
+
+def _create_pending_gate_http(
+    db: Session,
+    run: SandboxRun,
+    name: str,
+    notify: bool = True,
+) -> ApprovalGate:
+    try:
+        return create_pending_gate(db, run, name, notify=notify)
+    except ApprovalDeviceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
 
 
 def _require_run(db: Session, run_id: int) -> SandboxRun:
@@ -170,7 +191,7 @@ def _ensure_pending_gate(db: Session, run: SandboxRun, name: str) -> None:
     gate = _latest_gate(db, run, name)
     if gate is not None and gate.status == "pending":
         return
-    create_pending_gate(db, run, name)
+    _create_pending_gate_http(db, run, name)
 
 
 def resume_paused_run(run: SandboxRun, db: Session) -> None:
@@ -245,7 +266,10 @@ def create_run(
     db.add(run)
     db.commit()
     db.refresh(run)
-    gate = create_pending_provision_gate(db, run)
+    try:
+        gate = create_pending_provision_gate(db, run)
+    except ApprovalDeviceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
     _enqueue(clone_and_index, run.id)
     logger.info(
         "sandbox run %s queued with %s gate %s; clone_and_index published to celery",
@@ -284,6 +308,11 @@ def approve_sandbox(
             .first()
         )
         if latest is not None and latest.status == "approved":
+            if not latest.device_id or latest.device_id != body.device_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="device is not authorized for this gate",
+                )
             return {
                 "ok": True,
                 "run_id": run.id,
@@ -294,6 +323,7 @@ def approve_sandbox(
 
     _expire_if_needed(db, gate)
     device = _require_device(db, body.device_id)
+    _require_gate_device(gate, device.device_id)
     payload = f"{device.device_id}|{run.id}|{gate.gate}"
     if not verify_device_authorization(
         device,
@@ -368,10 +398,16 @@ def reject_sandbox(
             .first()
         )
         if latest is not None and latest.status == "rejected":
+            if not latest.device_id or latest.device_id != body.device_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="device is not authorized for this gate",
+                )
             return {"ok": True, "run_id": run.id, "status": "rejected"}
         raise HTTPException(status_code=404, detail="approval gate not found")
     _expire_if_needed(db, gate)
     device = _require_device(db, body.device_id)
+    _require_gate_device(gate, device.device_id)
     payload = f"{device.device_id}|{run.id}|{gate.gate}"
     if not verify_device_authorization(
         device,
@@ -517,6 +553,7 @@ def list_pending_approvals(
     device_id: str,
     db: Session = Depends(get_db),
 ):
+    _require_device(db, device_id)
     expire_stale_gates(db, notify=False, recreate=False, limit=20)
     now = datetime.now(timezone.utc)
     gates = (
@@ -525,10 +562,7 @@ def list_pending_approvals(
         .filter(
             ApprovalGate.status == "pending",
             ApprovalGate.expires_at > now,
-            or_(
-                ApprovalGate.device_id.is_(None),
-                ApprovalGate.device_id == device_id,
-            ),
+            ApprovalGate.device_id == device_id,
         )
         .order_by(ApprovalGate.id.desc())
         .all()

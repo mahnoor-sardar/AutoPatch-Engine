@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.db import get_db
 from app.main import app
 from app.models import ApprovalGate, Device, DeviceAuthReplay, Repository, SandboxRun
@@ -187,7 +189,9 @@ def test_create_run_returns_pending_provision_and_enqueues(monkeypatch):
         installation_id=1,
         default_branch="main",
     )
-    db = LifecycleDB(repo, None, None, None)
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=new_secret())
+    db = LifecycleDB(repo, None, None, device)
+    monkeypatch.setattr(settings, "approval_device_id", "dev-1")
     monkeypatch.setattr(
         "app.routers.sandbox.clone_and_index.delay",
         lambda run_id: delayed.append(("clone", run_id)) or Result(),
@@ -209,6 +213,7 @@ def test_create_run_returns_pending_provision_and_enqueues(monkeypatch):
         assert delayed == [("clone", 421)]
         assert db.gate is not None
         assert db.gate.status == "pending"
+        assert db.gate.device_id == "dev-1"
     finally:
         app.dependency_overrides.clear()
 
@@ -223,6 +228,7 @@ def test_approve_marks_gate_approved_and_enqueues(monkeypatch):
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
+        device_id="dev-1",
     )
     device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
     db = LifecycleDB(None, run, gate, device)
@@ -257,6 +263,7 @@ def test_replay_of_approved_gate_does_not_enqueue_again(monkeypatch):
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
+        device_id="dev-1",
     )
     device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
     db = LifecycleDB(None, run, gate, device)
@@ -292,18 +299,27 @@ def test_try_claim_pending_gate_only_succeeds_once():
         run_id=1,
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
+        device_id="dev-1",
     )
 
     class ClaimDB:
         def query(self, model):
             return Query(gate)
 
+    try:
+        try_claim_pending_gate(ClaimDB(), 7, "dev-2")
+        raise AssertionError("unbound device must not claim")
+    except HTTPException as exc:
+        assert exc.status_code == 403
+    assert gate.status == "pending"
+    assert gate.device_id == "dev-1"
+
     first = try_claim_pending_gate(ClaimDB(), 7, "dev-1")
     assert first is gate
     assert gate.status == "approved"
     assert gate.device_id == "dev-1"
     assert gate.approved_at is not None
-    second = try_claim_pending_gate(ClaimDB(), 7, "dev-2")
+    second = try_claim_pending_gate(ClaimDB(), 7, "dev-1")
     assert second is None
     assert gate.device_id == "dev-1"
 
@@ -342,6 +358,7 @@ def test_reject_stops_run_and_hides_pending(monkeypatch):
         gate=SANDBOX_PROVISION_GATE,
         status="pending",
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=GATE_TTL_SECONDS),
+        device_id="dev-1",
     )
     device = Device(device_id="dev-1", fcm_token="x", totp_secret=secret)
     db = LifecycleDB(None, run, gate, device)

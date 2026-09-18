@@ -9,7 +9,10 @@ from app.auth import require_api_key
 from app.config import settings
 from app.db import get_db
 from app.models import GitHubInstallation, Repository, SandboxRun
-from app.services.approval import create_pending_provision_gate
+from app.services.approval import (
+    ApprovalDeviceUnavailable,
+    create_pending_provision_gate,
+)
 from app.services.github_app import get_installation_token, verify_webhook_signature
 
 router = APIRouter()
@@ -177,7 +180,10 @@ async def github_webhook(
         db.commit()
         db.refresh(run)
 
-        gate = create_pending_provision_gate(db, run)
+        try:
+            gate = create_pending_provision_gate(db, run)
+        except ApprovalDeviceUnavailable as exc:
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
         _enqueue_clone_and_index(run.id)
 
         return {

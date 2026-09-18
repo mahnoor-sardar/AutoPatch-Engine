@@ -156,6 +156,7 @@ def test_approval_rejects_invalid_otp():
         run_id=1,
         gate="sandbox_provision",
         status="pending",
+        device_id="dev-1",
     )
     device = Device(
         device_id="dev-1",
@@ -183,6 +184,7 @@ def test_approval_accepts_valid_totp(monkeypatch):
         run_id=1,
         gate="sandbox_provision",
         status="pending",
+        device_id="dev-1",
     )
     device = Device(
         device_id="dev-1",

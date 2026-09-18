@@ -9,7 +9,10 @@ from app.config import settings
 from app.db import get_db
 from app.models import ErrorIngest, Repository, SandboxRun
 from app.schemas import ErrorIngestResponse, StackFrameOut
-from app.services.approval import create_pending_provision_gate
+from app.services.approval import (
+    ApprovalDeviceUnavailable,
+    create_pending_provision_gate,
+)
 from app.services.stacktrace import parse_stack_trace
 
 router = APIRouter()
@@ -261,7 +264,10 @@ def _maybe_start_run(
     db.add(run)
     db.commit()
     db.refresh(run)
-    create_pending_provision_gate(db, run)
+    try:
+        create_pending_provision_gate(db, run)
+    except ApprovalDeviceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
     _enqueue_clone_and_index(run.id)
 
 

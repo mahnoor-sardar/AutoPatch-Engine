@@ -66,7 +66,7 @@ def _insert_device(
         db.close()
 
 
-def _insert_run_with_pending_gate() -> tuple[int, str]:
+def _insert_run_with_pending_gate(device_id: str) -> tuple[int, str]:
     db = SessionLocal()
     try:
         run = SandboxRun(status="queued", repo="a/b", ref="main")
@@ -77,6 +77,7 @@ def _insert_run_with_pending_gate() -> tuple[int, str]:
             run_id=run.id,
             gate="sandbox_provision",
             status="pending",
+            device_id=device_id,
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=90),
         )
         db.add(gate)
@@ -161,7 +162,7 @@ def test_revoked_device_cannot_approve_with_valid_otp():
     device_id = _device_id("revoke-approve")
     secret = new_secret()
     _insert_device(device_id, secret, revoked=True)
-    run_id, _gate = _insert_run_with_pending_gate()
+    run_id, _gate = _insert_run_with_pending_gate(device_id)
     response = client.post(
         f"/v1/sandbox/runs/{run_id}/approval",
         headers=API_HEADERS,
@@ -176,7 +177,7 @@ def test_revoked_device_cannot_reject_with_valid_otp():
     device_id = _device_id("revoke-reject")
     secret = new_secret()
     _insert_device(device_id, secret, revoked=True)
-    run_id, _gate = _insert_run_with_pending_gate()
+    run_id, _gate = _insert_run_with_pending_gate(device_id)
     response = client.post(
         f"/v1/sandbox/runs/{run_id}/rejection",
         headers=API_HEADERS,
@@ -220,7 +221,7 @@ def test_active_device_can_still_approve(monkeypatch):
     device_id = _device_id("revoke-still-ok")
     secret = new_secret()
     _insert_device(device_id, secret)
-    run_id, _gate = _insert_run_with_pending_gate()
+    run_id, _gate = _insert_run_with_pending_gate(device_id)
     delayed = []
 
     class Result:
@@ -296,6 +297,7 @@ def test_approval_fcm_skips_revoked_device(monkeypatch):
             run_id=run.id,
             gate="sandbox_provision",
             status="pending",
+            device_id=active_id,
         )
         notify_devices_of_approval_gate(db, run, gate)
     finally:

@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import ApprovalGate, Device, PushEvent, SandboxRun
 from app.services import fcm
 from app.services.audit import (
@@ -23,16 +25,48 @@ STAGE_MERGE = "merge"
 STAGE_PR = "pr"
 
 
+class ApprovalDeviceUnavailable(Exception):
+    def __init__(self, detail: str = "approval device is not available") -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
+def resolve_approval_device(db: Session) -> Device:
+    configured = (settings.approval_device_id or "").strip()
+    if not configured:
+        raise ApprovalDeviceUnavailable("approval device is not configured")
+    return load_bindable_device(db, configured)
+
+
+def load_bindable_device(db: Session, device_id: str) -> Device:
+    device = (
+        db.query(Device)
+        .filter(Device.device_id == device_id)
+        .one_or_none()
+    )
+    if device is None or not device.totp_secret:
+        raise ApprovalDeviceUnavailable("approval device is not available")
+    if device.revoked_at is not None:
+        raise ApprovalDeviceUnavailable("approval device is revoked")
+    return device
+
+
 def create_pending_gate(
     db: Session,
     run: SandboxRun,
     gate_name: str,
     notify: bool = True,
+    device_id: str | None = None,
 ) -> ApprovalGate:
+    if device_id:
+        device = load_bindable_device(db, device_id)
+    else:
+        device = resolve_approval_device(db)
     gate = ApprovalGate(
         run_id=run.id,
         gate=gate_name,
         status="pending",
+        device_id=device.device_id,
         expires_at=datetime.now(timezone.utc)
         + timedelta(seconds=GATE_TTL_SECONDS),
     )
@@ -53,6 +87,7 @@ def try_claim_pending_gate(
 
     Returns the gate when this caller won the claim. Returns None if the
     gate is missing or already left pending (replay / lost race).
+    Rejects callers that are not the gate's bound device.
     """
     query = db.query(ApprovalGate).filter(
         ApprovalGate.id == gate_id,
@@ -63,8 +98,12 @@ def try_claim_pending_gate(
     locked = query.one_or_none()
     if locked is None:
         return None
+    if not locked.device_id or locked.device_id != device_id:
+        raise HTTPException(
+            status_code=403,
+            detail="device is not authorized for this gate",
+        )
     locked.status = "approved"
-    locked.device_id = device_id
     locked.approved_at = datetime.now(timezone.utc)
     return locked
 
@@ -93,19 +132,32 @@ def notify_devices_of_approval_gate(
     if run.current_diff:
         data["has_diff"] = "true"
 
-    for device in db.query(Device).filter(Device.revoked_at.is_(None)).all():
-        status = "sent"
-        try:
-            fcm.send_push_with_timeout(device.fcm_token, title, body, data)
-        except Exception:
-            status = "failed"
-        db.add(
-            PushEvent(
-                device_id=device.device_id,
-                title=title,
-                status=status,
-            )
+    if not gate.device_id:
+        db.commit()
+        return
+    device = (
+        db.query(Device)
+        .filter(
+            Device.device_id == gate.device_id,
+            Device.revoked_at.is_(None),
         )
+        .one_or_none()
+    )
+    if device is None or not device.totp_secret:
+        db.commit()
+        return
+    status = "sent"
+    try:
+        fcm.send_push_with_timeout(device.fcm_token, title, body, data)
+    except Exception:
+        status = "failed"
+    db.add(
+        PushEvent(
+            device_id=device.device_id,
+            title=title,
+            status=status,
+        )
+    )
     db.commit()
 
 
@@ -190,6 +242,18 @@ def apply_gate_expiry(
                 },
             )
         if recreate:
-            create_pending_gate(db, run, gate.gate, notify=notify)
+            if not gate.device_id:
+                db.commit()
+                return
+            try:
+                create_pending_gate(
+                    db,
+                    run,
+                    gate.gate,
+                    notify=notify,
+                    device_id=gate.device_id,
+                )
+            except ApprovalDeviceUnavailable:
+                db.commit()
             return
     db.commit()

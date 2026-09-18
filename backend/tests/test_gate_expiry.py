@@ -10,6 +10,7 @@ from app.services.approval import (
     expire_stale_gates,
     gate_is_expired,
 )
+from app.services.totp import new_secret
 from app.routers.sandbox import resume_paused_run
 
 
@@ -96,8 +97,10 @@ def test_gate_ttl_matches_90_second_requirement():
 
 def test_create_pending_gate_sets_90_second_expiry(monkeypatch):
     monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
+    monkeypatch.setattr("app.config.settings.approval_device_id", "dev-1")
     run = SandboxRun(id=1, status="queued", repo="a/b", ref="main")
-    db = RecordingDB(run, [])
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=new_secret())
+    db = RecordingDB(run, [], devices=[device])
     before = datetime.now(timezone.utc)
     gate = create_pending_gate(db, run, "sandbox_provision", notify=False)
     after = datetime.now(timezone.utc)
@@ -140,9 +143,11 @@ def test_apply_gate_expiry_pauses_run_and_recreates_gate(monkeypatch):
         run_id=1,
         gate="sandbox_provision",
         status="pending",
+        device_id="dev-1",
         expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
     )
-    db = RecordingDB(run, [gate])
+    device = Device(device_id="dev-1", fcm_token="x", totp_secret=new_secret())
+    db = RecordingDB(run, [gate], devices=[device])
     monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
     apply_gate_expiry(db, gate, recreate=True)
     assert gate.status == "expired"
@@ -152,6 +157,7 @@ def test_apply_gate_expiry_pauses_run_and_recreates_gate(monkeypatch):
     assert "expire" in actions
     pending = [g for g in db.gates if isinstance(g, ApprovalGate) and g.status == "pending"]
     assert pending
+    assert pending[0].device_id == "dev-1"
 
 
 def test_expire_stale_gates_skips_fresh_gates(monkeypatch):
