@@ -61,10 +61,11 @@ def test_ticket_expires_after_ttl():
 def test_malformed_and_tampered_tickets_are_rejected():
     ticket, _ttl = issue_ws_ticket()
     ts, signature = ticket.split(".", 1)
+    tampered_last = "1" if signature[-1] != "1" else "0"
     assert verify_ws_ticket("") is False
     assert verify_ws_ticket("noticket") is False
     assert verify_ws_ticket("nope.zz") is False
-    assert verify_ws_ticket(f"{ts}.{signature[:-1]}0") is False
+    assert verify_ws_ticket(f"{ts}.{signature[:-1]}{tampered_last}") is False
     assert verify_ws_ticket("abc.not-hex") is False
 
 
