@@ -361,7 +361,7 @@ def test_d_clone_task_skips_later_stage(monkeypatch):
         db.close()
 
 
-def test_e_success_return_state_is_valid_after_stale_running_clone():
+def test_e_stale_running_clone_without_diff_fails():
     run = SandboxRun(
         id=445,
         status="running",
@@ -374,7 +374,8 @@ def test_e_success_return_state_is_valid_after_stale_running_clone():
     )
     assert run_state_is_valid(run) is False
     assert _claim_clone_stage(LockDB(run), run, _now()) is False
-    assert run.status == "completed"
+    assert run.status == "failed"
+    assert run.error == "stale clone with no patch"
     assert run_state_is_valid(run)
 
 

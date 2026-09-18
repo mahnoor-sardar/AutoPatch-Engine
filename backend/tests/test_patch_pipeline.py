@@ -347,7 +347,8 @@ def test_stop_after_repro_never_calls_generate_patch(monkeypatch):
     db = SessionLocal()
     try:
         run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
-        assert run.status == "completed"
+        assert run.status == "failed"
+        assert run.error == "stopped after reproduction"
         assert run.current_diff is None
         assert run.pr_url is None
         assert run.patch_attempts == 0

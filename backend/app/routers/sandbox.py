@@ -835,7 +835,10 @@ def list_runs(
         db.query(
             func.count(SandboxRun.id).label("total"),
             func.count(SandboxRun.id)
-            .filter(SandboxRun.status == "completed")
+            .filter(
+                SandboxRun.status == "completed",
+                SandboxRun.pr_url.isnot(None),
+            )
             .label("successful"),
             func.count(SandboxRun.id)
             .filter(SandboxRun.status.in_(["running", "queued"]))

@@ -133,8 +133,10 @@ def _repair_stale_clone(run: SandboxRun) -> None:
         run.status = "awaiting_patch_review"
         run.pipeline_stage = STAGE_PATCH_REVIEW
     else:
-        run.status = "completed"
+        run.status = "failed"
         run.pipeline_stage = STAGE_CLONE
+        if not run.error:
+            run.error = "stale clone with no patch"
     _ensure_finished_at(run)
 
 
@@ -574,185 +576,193 @@ def clone_and_index(run_id: int) -> None:
         db.commit()
         store_symbol_embeddings(db, run.id)
 
-        if run.stack_trace:
-            parsed_trace = parse_stack_trace(run.stack_trace)
-            symbols = [
-                {
-                    "path": path,
-                    "name": name,
-                    "kind": kind,
-                    "start_line": line,
-                }
-                for path, name, kind, line in rows
+        def fail_incomplete(reason: str) -> None:
+            _finish(run, started, "failed", reason)
+            db.commit()
+            notify_run_event(db, run, "Run failed", reason[:180])
+
+        if not run.stack_trace:
+            fail_incomplete("missing stack_trace")
+            return
+
+        parsed_trace = parse_stack_trace(run.stack_trace)
+        symbols = [
+            {
+                "path": path,
+                "name": name,
+                "kind": kind,
+                "start_line": line,
+            }
+            for path, name, kind, line in rows
+        ]
+        locations = locate_frames(
+            parsed_trace.frames, symbols, sources=files
+        )
+        if not locations:
+            fail_incomplete("no locateable frames")
+            return
+
+        location = locations[-1]
+        source = files.get(location.path)
+        if source is None:
+            matching_paths = [
+                path
+                for path in files
+                if path.endswith(location.path)
             ]
-            locations = locate_frames(
-                parsed_trace.frames, symbols, sources=files
+            if len(matching_paths) == 1:
+                source = files[matching_paths[0]]
+        if source is None:
+            fail_incomplete("source file not found")
+            return
+
+        try:
+            reproduction = synthesize_repro(
+                location=location,
+                source=source,
+                exception_type=parsed_trace.exception_type,
+                message=parsed_trace.message,
             )
-            if locations:
-                location = locations[-1]
-                source = files.get(location.path)
-                if source is None:
-                    matching_paths = [
-                        path
-                        for path in files
-                        if path.endswith(location.path)
-                    ]
-                    if len(matching_paths) == 1:
-                        source = files[matching_paths[0]]
-                if source is not None:
-                    try:
-                        reproduction = synthesize_repro(
-                            location=location,
-                            source=source,
-                            exception_type=parsed_trace.exception_type,
-                            message=parsed_trace.message,
-                        )
-                        result = run_reproduction_test(
-                            sandbox=sandbox,
-                            test_path=reproduction.test_path,
-                            test_source=reproduction.test_source,
-                            install_dependencies=False,
-                        )
-                        attempt = ReproductionAttempt(
-                            run_id=run.id,
-                            stack_trace=run.stack_trace,
-                            diagnostic_path=location.path,
-                            diagnostic_name=location.name,
-                            diagnostic_line=location.start_line,
-                            test_path=reproduction.test_path,
-                            test_source=reproduction.test_source,
-                            exit_code=result.exit_code,
-                            stdout=result.stdout,
-                            stderr=result.stderr,
-                            reproduced=result.reproduced,
-                        )
-                        db.add(attempt)
-                        db.commit()
+        except ValueError as exc:
+            db.add(
+                ReproductionAttempt(
+                    run_id=run.id,
+                    stack_trace=run.stack_trace,
+                    diagnostic_path=location.path,
+                    diagnostic_name=location.name,
+                    diagnostic_line=location.start_line,
+                    reproduced=False,
+                    stderr=str(exc),
+                )
+            )
+            db.commit()
+            fail_incomplete(str(exc) or "reproduction synthesis failed")
+            return
 
-                        if result.reproduced:
-                            diagnosis = None
-                            try:
-                                diagnosis = diagnose_reproduction(
-                                    path=location.path,
-                                    name=location.name,
-                                    line=location.start_line,
-                                    exception_type=parsed_trace.exception_type,
-                                    source=source,
-                                    test_source=reproduction.test_source,
-                                    stderr=result.stderr,
-                                    stack_trace=run.stack_trace,
-                                )
-                                log_audit(
-                                    db,
-                                    "diagnosis",
-                                    run.id,
-                                    None,
-                                    diagnosis,
-                                    actor=ACTOR_WORKER,
-                                    result=RESULT_SUCCESS,
-                                )
-                                db.commit()
-                            except Exception:
-                                logger.exception("gemini diagnosis failed")
-
-                            if settings.autopatch_stop_after_repro:
-                                _finish(run, started, "completed")
-                                db.commit()
-                                notify_run_event(
-                                    db,
-                                    run,
-                                    "Run completed",
-                                    f"{run.repo} stopped after reproduction",
-                                )
-                                return
-                            try:
-                                generated = _as_patch_result(
-                                    generate_patch(
-                                        path=location.path,
-                                        source=source,
-                                        test_source=reproduction.test_source,
-                                        stderr=result.stderr,
-                                        exception_type=parsed_trace.exception_type,
-                                        files=files,
-                                        diagnosis=diagnosis,
-                                        tokens_used=run.llm_tokens_used or 0,
-                                    )
-                                )
-                                _add_llm_usage(run, generated.tokens_used)
-                                _queue_patch_for_review(
-                                    db, run, generated.diff, started
-                                )
-                                notify_run_event(
-                                    db,
-                                    run,
-                                    "Patch ready for review",
-                                    f"{run.repo} diff waiting on Android",
-                                    {"has_diff": "true"},
-                                )
-                                return
-                            except LlmNotConfigured as exc:
-                                _finish(run, started, "failed", str(exc))
-                                db.commit()
-                                notify_run_event(
-                                    db, run, "Run failed", str(exc)[:180]
-                                )
-                                return
-                            except LlmTokenBudgetExceeded:
-                                _finish(
-                                    run,
-                                    started,
-                                    "failed",
-                                    "LLM token budget exceeded",
-                                )
-                                db.commit()
-                                notify_run_event(
-                                    db,
-                                    run,
-                                    "Run failed",
-                                    "LLM token budget exceeded",
-                                )
-                                return
-                            except LlmRequestTimeout as exc:
-                                _finish(run, started, "failed", str(exc))
-                                db.commit()
-                                notify_run_event(
-                                    db, run, "Run failed", str(exc)[:180]
-                                )
-                                return
-                            except Exception:
-                                logger.exception("patch generation failed")
-                                _finish(
-                                    run,
-                                    started,
-                                    "failed",
-                                    "patch generation failed",
-                                )
-                                db.commit()
-                                notify_run_event(
-                                    db,
-                                    run,
-                                    "Run failed",
-                                    "patch generation failed",
-                                )
-                                return
-                    except ValueError as exc:
-                        db.add(
-                            ReproductionAttempt(
-                                run_id=run.id,
-                                stack_trace=run.stack_trace,
-                                diagnostic_path=location.path,
-                                diagnostic_name=location.name,
-                                diagnostic_line=location.start_line,
-                                reproduced=False,
-                                stderr=str(exc),
-                            )
-                        )
-                        db.commit()
-
-        run.e2b_sandbox_id = sandbox.sandbox_id
-        _finish(run, started, "completed")
+        result = run_reproduction_test(
+            sandbox=sandbox,
+            test_path=reproduction.test_path,
+            test_source=reproduction.test_source,
+            install_dependencies=False,
+        )
+        attempt = ReproductionAttempt(
+            run_id=run.id,
+            stack_trace=run.stack_trace,
+            diagnostic_path=location.path,
+            diagnostic_name=location.name,
+            diagnostic_line=location.start_line,
+            test_path=reproduction.test_path,
+            test_source=reproduction.test_source,
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            reproduced=result.reproduced,
+        )
+        db.add(attempt)
         db.commit()
-        notify_run_event(db, run, "Run completed", f"{run.repo} finished")
+
+        if not result.reproduced:
+            fail_incomplete("bug not reproduced")
+            return
+
+        diagnosis = None
+        try:
+            diagnosis = diagnose_reproduction(
+                path=location.path,
+                name=location.name,
+                line=location.start_line,
+                exception_type=parsed_trace.exception_type,
+                source=source,
+                test_source=reproduction.test_source,
+                stderr=result.stderr,
+                stack_trace=run.stack_trace,
+            )
+            log_audit(
+                db,
+                "diagnosis",
+                run.id,
+                None,
+                diagnosis,
+                actor=ACTOR_WORKER,
+                result=RESULT_SUCCESS,
+            )
+            db.commit()
+        except Exception:
+            logger.exception("gemini diagnosis failed")
+
+        if settings.autopatch_stop_after_repro:
+            fail_incomplete("stopped after reproduction")
+            return
+        try:
+            generated = _as_patch_result(
+                generate_patch(
+                    path=location.path,
+                    source=source,
+                    test_source=reproduction.test_source,
+                    stderr=result.stderr,
+                    exception_type=parsed_trace.exception_type,
+                    files=files,
+                    diagnosis=diagnosis,
+                    tokens_used=run.llm_tokens_used or 0,
+                )
+            )
+            _add_llm_usage(run, generated.tokens_used)
+            _queue_patch_for_review(
+                db, run, generated.diff, started
+            )
+            notify_run_event(
+                db,
+                run,
+                "Patch ready for review",
+                f"{run.repo} diff waiting on Android",
+                {"has_diff": "true"},
+            )
+            return
+        except LlmNotConfigured as exc:
+            _finish(run, started, "failed", str(exc))
+            db.commit()
+            notify_run_event(
+                db, run, "Run failed", str(exc)[:180]
+            )
+            return
+        except LlmTokenBudgetExceeded:
+            _finish(
+                run,
+                started,
+                "failed",
+                "LLM token budget exceeded",
+            )
+            db.commit()
+            notify_run_event(
+                db,
+                run,
+                "Run failed",
+                "LLM token budget exceeded",
+            )
+            return
+        except LlmRequestTimeout as exc:
+            _finish(run, started, "failed", str(exc))
+            db.commit()
+            notify_run_event(
+                db, run, "Run failed", str(exc)[:180]
+            )
+            return
+        except Exception:
+            logger.exception("patch generation failed")
+            _finish(
+                run,
+                started,
+                "failed",
+                "patch generation failed",
+            )
+            db.commit()
+            notify_run_event(
+                db,
+                run,
+                "Run failed",
+                "patch generation failed",
+            )
+            return
     except Retry:
         raise
     except MaxRetriesExceededError:
