@@ -83,6 +83,11 @@ class SandboxRun(Base):
         default="main",
     )
 
+    source_sha: Mapped[str | None] = mapped_column(
+        String(40),
+        nullable=True,
+    )
+
     stack_trace: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

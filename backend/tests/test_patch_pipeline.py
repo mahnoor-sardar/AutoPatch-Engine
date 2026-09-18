@@ -26,6 +26,7 @@ SOURCE_FILES = {
 """
 }
 
+TEST_SOURCE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 SEEDED_DIFF = "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
 RETRY_DIFF = "diff --git a/y b/y\n--- a/y\n+++ b/y\n"
 
@@ -62,10 +63,11 @@ def _seed_run(status="queued", **kwargs):
     db = SessionLocal()
     try:
         repo = _ensure_test_repository(db)
+        ref = kwargs.pop("ref", repo.default_branch)
         run = SandboxRun(
             status=status,
             repo=repo.full_name,
-            ref=repo.default_branch,
+            ref=ref,
             stack_trace=STACK_TRACE,
             **kwargs,
         )
@@ -94,15 +96,22 @@ def _approve(run_id, gate):
 
 
 def _fake_sandbox():
+    def _run(command="", *a, **k):
+        stdout = ""
+        text = command if isinstance(command, str) else ""
+        if "rev-parse" in text:
+            stdout = TEST_SOURCE_SHA + "\n"
+        return SimpleNamespace(stdout=stdout, stderr="", exit_code=0)
+
     files = SimpleNamespace(write=lambda path, content: None)
-    commands = SimpleNamespace(run=lambda *a, **k: SimpleNamespace(stdout="", stderr=""))
+    commands = SimpleNamespace(run=_run)
     return SimpleNamespace(
         sandbox_id="sbx-test",
         kill=lambda: None,
         files=files,
         commands=commands,
         write_file=lambda path, content: None,
-        run=lambda *a, **k: SimpleNamespace(stdout="", stderr=""),
+        run=_run,
     )
 
 
@@ -372,6 +381,7 @@ def test_patch_retry_stops_at_max_attempts(monkeypatch):
         current_diff="diff --git a/x b/x\n",
         patch_attempts=MAX_PATCH_ATTEMPTS,
         pipeline_stage="patch_apply",
+        source_sha=TEST_SOURCE_SHA,
     )
     _approve(run_id, "patch_review")
     generated = []
@@ -431,6 +441,7 @@ def _seed_apply_verify_run():
         current_diff=SEEDED_DIFF,
         patch_attempts=1,
         pipeline_stage="patch_review",
+        source_sha=TEST_SOURCE_SHA,
     )
     _approve(run_id, "patch_review")
     db = SessionLocal()

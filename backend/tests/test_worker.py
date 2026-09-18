@@ -89,15 +89,24 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
         sandbox_id="worker-test-sandbox",
         kill=lambda: None,
         files=SimpleNamespace(write=lambda *a, **k: None),
-        commands=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(stdout="", stderr="")),
+        commands=SimpleNamespace(
+            run=lambda *a, **k: SimpleNamespace(
+                stdout="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+                stderr="",
+            )
+        ),
         write_file=lambda *a, **k: None,
-        run=lambda *a, **k: SimpleNamespace(stdout="", stderr=""),
+        run=lambda *a, **k: SimpleNamespace(
+            stdout="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            stderr="",
+        ),
     )
 
     def fake_clone_and_read_sources_in_sandbox(
         clone_url,
         ref,
         token,
+        sha=None,
     ):
         return fake_sandbox, SOURCE_FILES
 

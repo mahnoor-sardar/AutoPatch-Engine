@@ -1,4 +1,5 @@
 import json
+import re
 import httpx
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -16,6 +17,19 @@ from app.services.approval import (
 from app.services.github_app import get_installation_token, verify_webhook_signature
 
 router = APIRouter()
+
+_GIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_ZERO_SHA = "0" * 40
+
+
+def _push_source_sha(payload: dict) -> str | None:
+    after = payload.get("after")
+    if not isinstance(after, str):
+        return None
+    sha = after.strip().lower()
+    if _GIT_SHA.fullmatch(sha) and sha != _ZERO_SHA:
+        return sha
+    return None
 
 
 def _enqueue_clone_and_index(run_id: int) -> None:
@@ -174,6 +188,7 @@ async def github_webhook(
             status="queued",
             repo=repo_full_name,
             ref=ref or repo.default_branch,
+            source_sha=_push_source_sha(payload),
         )
 
         db.add(run)

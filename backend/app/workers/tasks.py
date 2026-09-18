@@ -478,6 +478,22 @@ def _finish(run: SandboxRun, started, status: str, error: str | None = None):
     run.duration_ms = int((finished - started).total_seconds() * 1000)
 
 
+def _required_source_sha(run: SandboxRun) -> str:
+    try:
+        return e2b_runner.parse_git_sha(run.source_sha)
+    except ValueError as exc:
+        raise RuntimeError("source_sha is required") from exc
+
+
+def _clone_run_sources(run: SandboxRun, token: str, *, sha: str | None = None):
+    return e2b_runner.clone_and_read_sources_in_sandbox(
+        clone_url=clone_url(run.repo),
+        ref=run.ref,
+        token=token,
+        sha=sha,
+    )
+
+
 @celery_app.task(name="clone_and_index", max_retries=180, default_retry_delay=5)
 def clone_and_index(run_id: int) -> None:
     db = SessionLocal()
@@ -508,11 +524,19 @@ def clone_and_index(run_id: int) -> None:
             PERMISSIONS_REPO_READ,
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
-        sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
-            clone_url=clone_url(run.repo),
-            ref=run.ref,
-            token=token,
-        )
+        pin = None
+        if run.source_sha:
+            try:
+                pin = e2b_runner.parse_git_sha(run.source_sha)
+            except ValueError:
+                pin = None
+        sandbox, files = _clone_run_sources(run, token, sha=pin)
+        head = e2b_runner.checkout_head_sha(sandbox)
+        if pin and head != pin:
+            raise RuntimeError(
+                f"checkout HEAD {head} does not match source_sha {pin}"
+            )
+        run.source_sha = head
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
 
@@ -774,6 +798,12 @@ def apply_patch_and_verify(run_id: int) -> None:
             _finish(run, started, "failed", "no patch diff to apply")
             db.commit()
             return
+        try:
+            source_sha = _required_source_sha(run)
+        except RuntimeError:
+            _finish(run, started, "failed", "source_sha is required")
+            db.commit()
+            return
 
         repo = (
             db.query(Repository)
@@ -786,11 +816,12 @@ def apply_patch_and_verify(run_id: int) -> None:
             PERMISSIONS_REPO_READ,
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
-        sandbox, files = e2b_runner.clone_and_read_sources_in_sandbox(
-            clone_url=clone_url(run.repo),
-            ref=run.ref,
-            token=token,
-        )
+        sandbox, files = _clone_run_sources(run, token, sha=source_sha)
+        head = e2b_runner.checkout_head_sha(sandbox)
+        if head != source_sha:
+            raise RuntimeError(
+                f"checkout HEAD {head} does not match source_sha {source_sha}"
+            )
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
         install_code, _out, install_err = e2b_runner.install_project_dependencies(
@@ -916,6 +947,12 @@ def open_github_pr(run_id: int) -> None:
             return
         if not _claim_pr_stage(db, run, started):
             return
+        try:
+            source_sha = _required_source_sha(run)
+        except RuntimeError:
+            _finish(run, started, "failed", "source_sha is required")
+            db.commit()
+            return
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -928,17 +965,23 @@ def open_github_pr(run_id: int) -> None:
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, read_token))
         branch = f"autopatch/run-{run.id}"
-        sandbox, _files = e2b_runner.clone_and_read_sources_in_sandbox(
-            clone_url=clone_url(run.repo),
-            ref=run.ref,
-            token=read_token,
-        )
+        sandbox, _files = _clone_run_sources(run, read_token, sha=source_sha)
+        head = e2b_runner.checkout_head_sha(sandbox)
+        if head != source_sha:
+            raise RuntimeError(
+                f"checkout HEAD {head} does not match source_sha {source_sha}"
+            )
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
         if run.current_diff:
             apply_ok, apply_err = apply_diff_in_sandbox(sandbox, run.current_diff)
             if not apply_ok:
                 raise RuntimeError(apply_err or "git apply failed")
+        applied_head = e2b_runner.checkout_head_sha(sandbox)
+        if applied_head != source_sha:
+            raise RuntimeError(
+                f"checkout HEAD {applied_head} does not match source_sha {source_sha}"
+            )
         e2b_runner.run_sandbox_command(
             sandbox,
             "cd /home/user/repo && "
@@ -949,6 +992,11 @@ def open_github_pr(run_id: int) -> None:
             "git commit -m 'fix: verified autopatch'",
             120,
         )
+        parent = e2b_runner.commit_parent_sha(sandbox)
+        if parent != source_sha:
+            raise RuntimeError(
+                f"patch commit parent {parent} does not match source_sha {source_sha}"
+            )
         write_token = installation_token_for_repo(
             repo.installation_id,
             run.repo,

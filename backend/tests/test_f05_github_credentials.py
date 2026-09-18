@@ -38,9 +38,10 @@ class _Result:
 class RecordingSandbox:
     sandbox_id = "sbx-f05"
 
-    def __init__(self, origin=CLONE_URL):
+    def __init__(self, origin=CLONE_URL, head_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"):
         self.ran = []
         self.origin = origin
+        self.head_sha = head_sha
         self.commands = SimpleNamespace(run=self._run)
         self.files = SimpleNamespace(read=lambda path: "")
 
@@ -48,6 +49,10 @@ class RecordingSandbox:
         self.ran.append(command)
         if "config --get remote.origin.url" in command:
             return _Result(self.origin + "\n")
+        if "rev-parse HEAD^" in command:
+            return _Result(self.head_sha + "\n")
+        if "rev-parse HEAD" in command:
+            return _Result(self.head_sha + "\n")
         if "git ls-files" in command:
             return _Result("")
         return _Result("")
@@ -239,6 +244,7 @@ def test_open_github_pr_requests_write_token_after_merge_gate(monkeypatch):
         status="awaiting_merge",
         current_diff="diff --git a/x b/x\n--- a/x\n+++ b/x\n",
         pipeline_stage="merge",
+        source_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     _approve(run_id, "merge")
 

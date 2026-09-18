@@ -148,6 +148,25 @@ def create_sandbox() -> Sandbox:
 _CLONE_URL = re.compile(
     r"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$"
 )
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_ZERO_SHA = "0" * 40
+
+
+def parse_git_sha(value: str | None) -> str:
+    sha = (value or "").strip().lower()
+    if not _GIT_SHA.fullmatch(sha) or sha == _ZERO_SHA:
+        raise ValueError("invalid git sha")
+    return sha
+
+
+def checkout_head_sha(sandbox) -> str:
+    result = _run(sandbox, "git -C /home/user/repo rev-parse HEAD", 30)
+    return parse_git_sha((getattr(result, "stdout", None) or "").strip())
+
+
+def commit_parent_sha(sandbox) -> str:
+    result = _run(sandbox, "git -C /home/user/repo rev-parse HEAD^", 30)
+    return parse_git_sha((getattr(result, "stdout", None) or "").strip())
 
 
 def _git_bearer_header_opt(token: str) -> str:
@@ -176,22 +195,39 @@ def clone_and_read_sources(
     clone_url: str,
     ref: str,
     token: str,
+    sha: str | None = None,
 ) -> dict[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", ref):
         raise ValueError("invalid git ref")
     if not _CLONE_URL.fullmatch(clone_url):
         raise ValueError("invalid clone url")
 
+    pinned_sha = parse_git_sha(sha) if sha else None
     safe_ref = shlex.quote(ref)
     safe_url = shlex.quote(clone_url)
     header_opt = _git_bearer_header_opt(token)
-    clone_command = (
-        f"git {header_opt} clone --depth 1 "
-        f"--branch {safe_ref} {safe_url} /home/user/repo"
-    )
+    if pinned_sha:
+        safe_sha = shlex.quote(pinned_sha)
+        clone_commands = [
+            f"git init /home/user/repo",
+            "git -C /home/user/repo remote add origin " + safe_url,
+            (
+                f"git -C /home/user/repo {header_opt} fetch --depth 1 "
+                f"origin {safe_sha}"
+            ),
+            f"git -C /home/user/repo checkout --detach {safe_sha}",
+        ]
+    else:
+        clone_commands = [
+            (
+                f"git {header_opt} clone --depth 1 "
+                f"--branch {safe_ref} {safe_url} /home/user/repo"
+            )
+        ]
 
     try:
-        _run(sandbox, clone_command, COMMAND_TIMEOUT)
+        for command in clone_commands:
+            _run(sandbox, command, COMMAND_TIMEOUT)
         _run(
             sandbox,
             "git -C /home/user/repo remote set-url origin " + safe_url,
@@ -207,6 +243,12 @@ def clone_and_read_sources(
             clone_url,
             token,
         )
+        if pinned_sha:
+            head = checkout_head_sha(sandbox)
+            if head != pinned_sha:
+                raise RuntimeError(
+                    f"checkout HEAD {head} does not match source_sha {pinned_sha}"
+                )
     except Exception as exc:
         details = str(exc)
         for attr in ("stdout", "stderr", "exit_code"):
@@ -246,6 +288,7 @@ def clone_and_read_sources_in_sandbox(
     clone_url: str,
     ref: str,
     token: str,
+    sha: str | None = None,
 ):
     session = get_sandbox_provider().create()
     try:
@@ -255,6 +298,7 @@ def clone_and_read_sources_in_sandbox(
             clone_url=clone_url,
             ref=ref,
             token=token,
+            sha=sha,
         )
         return session, files
     except Exception:

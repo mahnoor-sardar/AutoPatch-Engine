@@ -145,6 +145,77 @@ def test_push_creates_pending_gate_and_enqueues_clone_once(monkeypatch):
     assert delayed == [run_id]
 
 
+def test_push_stores_valid_after_sha_and_keeps_ref(monkeypatch):
+    delayed = []
+    monkeypatch.setattr(
+        "app.routers.github._enqueue_clone_and_index",
+        lambda run_id: delayed.append(run_id),
+    )
+    monkeypatch.setattr("app.services.fcm.send_push", lambda *args, **kwargs: "ok")
+    db = SessionLocal()
+    try:
+        _ensure_owner_repo(db)
+    finally:
+        db.close()
+    sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    body = json.dumps(
+        {
+            "ref": "refs/heads/main",
+            "after": sha,
+            "repository": {"full_name": "owner/repo"},
+        }
+    ).encode()
+    response = client.post(
+        "/v1/github/webhook",
+        content=body,
+        headers=_signed_headers(body, "push"),
+    )
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    db = SessionLocal()
+    try:
+        run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+        assert run.ref == "main"
+        assert run.source_sha == sha
+    finally:
+        db.close()
+    assert delayed == [run_id]
+
+
+def test_push_ignores_invalid_and_zero_after(monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.github._enqueue_clone_and_index",
+        lambda run_id: None,
+    )
+    monkeypatch.setattr("app.services.fcm.send_push", lambda *args, **kwargs: "ok")
+    db = SessionLocal()
+    try:
+        _ensure_owner_repo(db)
+    finally:
+        db.close()
+    for after in ("main", "0" * 40, "deadbeef"):
+        body = json.dumps(
+            {
+                "ref": "refs/heads/main",
+                "after": after,
+                "repository": {"full_name": "owner/repo"},
+            }
+        ).encode()
+        response = client.post(
+            "/v1/github/webhook",
+            content=body,
+            headers=_signed_headers(body, "push"),
+        )
+        run_id = response.json()["run_id"]
+        db = SessionLocal()
+        try:
+            run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+            assert run.ref == "main"
+            assert run.source_sha is None
+        finally:
+            db.close()
+
+
 def test_duplicate_push_creates_separate_runs_and_jobs(monkeypatch):
     delayed = []
     monkeypatch.setattr(
