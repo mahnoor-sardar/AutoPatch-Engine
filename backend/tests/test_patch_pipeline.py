@@ -136,7 +136,8 @@ def test_reproduced_bug_without_llm_does_not_complete(monkeypatch):
         lambda sandbox, test_path, test_source, **kwargs: ReproductionResult(
             exit_code=1,
             stdout="",
-            stderr="ZeroDivisionError",
+            stderr="ZeroDivisionError: division by zero",
+            expected_exception="ZeroDivisionError",
         ),
     )
     from app.services.patcher import LlmNotConfigured
@@ -176,7 +177,8 @@ def test_reproduced_bug_with_diff_awaits_review(monkeypatch):
         lambda sandbox, test_path, test_source, **kwargs: ReproductionResult(
             exit_code=1,
             stdout="",
-            stderr="ZeroDivisionError",
+            stderr="ZeroDivisionError: division by zero",
+            expected_exception="ZeroDivisionError",
         ),
     )
     monkeypatch.setattr(
@@ -223,7 +225,8 @@ def _stub_repro_pipeline(monkeypatch):
         lambda sandbox, test_path, test_source, **kwargs: ReproductionResult(
             exit_code=1,
             stdout="",
-            stderr="ZeroDivisionError",
+            stderr="ZeroDivisionError: division by zero",
+            expected_exception="ZeroDivisionError",
         ),
     )
     monkeypatch.setattr(
@@ -330,7 +333,8 @@ def test_stop_after_repro_never_calls_generate_patch(monkeypatch):
         lambda sandbox, test_path, test_source, **kwargs: ReproductionResult(
             exit_code=1,
             stdout="",
-            stderr="ZeroDivisionError",
+            stderr="ZeroDivisionError: division by zero",
+            expected_exception="ZeroDivisionError",
         ),
     )
 

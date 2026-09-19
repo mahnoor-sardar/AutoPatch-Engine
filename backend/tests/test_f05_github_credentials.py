@@ -204,7 +204,8 @@ def test_clone_and_index_requests_read_token_only(monkeypatch):
         lambda *a, **k: ReproductionResult(
             exit_code=1,
             stdout="",
-            stderr="ZeroDivisionError",
+            stderr="ZeroDivisionError: division by zero",
+            expected_exception="ZeroDivisionError",
         ),
     )
     monkeypatch.setattr(

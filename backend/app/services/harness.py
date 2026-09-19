@@ -17,6 +17,7 @@ _SYNTHESIS_MARKERS = (
 _EXPECTED_EXCEPTION_ASSIGN = re.compile(
     r"expected_exception\s*=\s*([A-Za-z_][\w.]*)"
 )
+_GENERIC_EXCEPTIONS = frozenset({"Exception", "BaseException", "Error"})
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class ReproductionResult:
             return False
         if self.exit_code == 0:
             return False
+        combined = _combined_output(self.stdout, self.stderr)
+        if _is_synthesis_failure(combined):
+            return False
         if not _stderr_matches_expected(
             self.stdout, self.stderr, self.expected_exception
         ):
@@ -53,23 +57,41 @@ class ReproductionResult:
         return self.exit_code == 0
 
 
+def _combined_output(stdout: str, stderr: str) -> str:
+    return f"{stdout}\n{stderr}"
+
+
+def _specific_expected_exception(name: str | None) -> str | None:
+    if not name:
+        return None
+    short = name.split(".")[-1]
+    if short in _GENERIC_EXCEPTIONS:
+        return None
+    return short
+
+
 def _expected_exception_from_source(test_source: str) -> str | None:
     match = _EXPECTED_EXCEPTION_ASSIGN.search(test_source)
     if match is None:
         return None
-    name = match.group(1).split(".")[-1]
-    if name in {"Exception", "BaseException", "Error"}:
-        return None
-    return name
+    return _specific_expected_exception(match.group(1))
+
+
+def _exception_header_pattern(expected_exception: str) -> re.Pattern[str]:
+    name = re.escape(expected_exception)
+    return re.compile(
+        rf"(?m)^\s*(?:E\s+)?(?:[A-Za-z_][\w.]*\.)*{name}:"
+    )
 
 
 def _stderr_matches_expected(
     stdout: str, stderr: str, expected_exception: str | None
 ) -> bool:
-    if not expected_exception:
-        return True
-    combined = f"{stdout}\n{stderr}"
-    return expected_exception in combined
+    specific = _specific_expected_exception(expected_exception)
+    if not specific:
+        return False
+    combined = _combined_output(stdout, stderr)
+    return _exception_header_pattern(specific).search(combined) is not None
 
 
 def _is_synthesis_failure(stderr: str) -> bool:
@@ -116,27 +138,34 @@ def run_reproduction_test(
                 setup_failed=True,
             )
 
+    expected_exception = _expected_exception_from_source(test_source)
     try:
         result = _run_command(
             sandbox, _repro_command(test_path), REPRO_TIMEOUT
         )
+        stdout = install_out + (result.stdout or "")
+        stderr = result.stderr or ""
         return ReproductionResult(
             exit_code=int(getattr(result, "exit_code", 0) or 0),
-            stdout=(install_out + (result.stdout or "")),
-            stderr=result.stderr or "",
-            expected_exception=_expected_exception_from_source(test_source),
+            stdout=stdout,
+            stderr=stderr,
+            synthesis_failed=_is_synthesis_failure(
+                _combined_output(stdout, stderr)
+            ),
+            expected_exception=expected_exception,
         )
     except Exception as exc:
         exit_code = int(getattr(exc, "exit_code", 1) or 1)
-        stdout = getattr(exc, "stdout", "") or ""
+        stdout = install_out + (getattr(exc, "stdout", "") or "")
         stderr = getattr(exc, "stderr", "") or str(exc)
-        synthesis_failed = _is_synthesis_failure(stderr)
         return ReproductionResult(
             exit_code=exit_code,
-            stdout=install_out + stdout,
+            stdout=stdout,
             stderr=stderr,
-            synthesis_failed=synthesis_failed,
-            expected_exception=_expected_exception_from_source(test_source),
+            synthesis_failed=_is_synthesis_failure(
+                _combined_output(stdout, stderr)
+            ),
+            expected_exception=expected_exception,
         )
 
 

@@ -66,6 +66,7 @@ ZeroDivisionError: division by zero
         exit_code=1,
         stdout="",
         stderr="ZeroDivisionError: division by zero",
+        expected_exception="ZeroDivisionError",
     )
 
     assert result.reproduced is True

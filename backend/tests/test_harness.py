@@ -17,6 +17,7 @@ def test_reproduction_result_success_when_exit_code_is_nonzero():
         exit_code=1,
         stdout="",
         stderr="ZeroDivisionError: division by zero",
+        expected_exception="ZeroDivisionError",
     )
     assert result.reproduced is True
     assert result.exit_code == 1
