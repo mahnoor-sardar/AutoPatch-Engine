@@ -7,12 +7,24 @@ from app.services.indexer import (
     ParameterInfo,
     enclosing_class_name,
     function_parameters,
+    inspect_class_init_parameters,
     inspect_function_parameters,
 )
 
 
 _JS_ERROR_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GENERIC_JS_ERRORS = frozenset({"Error", "Exception"})
+_JS_BUILTIN_ERRORS = frozenset(
+    {
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+        "ReferenceError",
+        "URIError",
+        "EvalError",
+        "AggregateError",
+    }
+)
 
 
 _PRIMITIVE_ARGS = {
@@ -94,6 +106,8 @@ def _python_call_args(
         )
         if value is None:
             missing.append(param.name)
+        elif param.keyword_only:
+            args.append(f"{param.name}={value}")
         else:
             args.append(value)
     if missing:
@@ -103,6 +117,20 @@ def _python_call_args(
             f"unsupported required parameter(s): {names}"
         )
     return ", ".join(args)
+
+
+def _python_instance_construction(
+    path: str,
+    source: str,
+    owner: str,
+    exception_type: str | None,
+    message: str | None,
+) -> str:
+    init_params = inspect_class_init_parameters(path, source, owner)
+    init_args = _python_call_args(init_params, exception_type, message)
+    if init_args:
+        return f"{owner}({init_args})"
+    return f"{owner}()"
 
 
 def synthesize_python_repro(
@@ -131,17 +159,22 @@ def synthesize_python_repro(
     )
     imported = owner or location.name
     if owner and has_self:
+        constructed = _python_instance_construction(
+            location.path, source, owner, exception_type, message
+        )
         invoked = (
-            f"{owner}.{location.name}(None, {call_args})"
+            f"{constructed}.{location.name}({call_args})"
             if call_args
-            else f"{owner}.{location.name}(None)"
+            else f"{constructed}.{location.name}()"
         )
     elif owner:
         invoked = f"{owner}.{location.name}({call_args})"
     else:
         invoked = f"{location.name}({call_args})"
 
-    test_source = f'''import sys
+    test_source = f'''import asyncio
+import inspect
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -155,7 +188,9 @@ def test_reproduces_{location.name}_failure():
     expected_exception = {expected_exception}
 
     try:
-        {invoked}
+        _result = {invoked}
+        if inspect.isawaitable(_result):
+            asyncio.run(_result)
     except expected_exception:
         raise
 '''
@@ -177,6 +212,12 @@ def _javascript_expected_error(exception_type: str | None) -> str | None:
     if not (name.endswith("Error") or name.endswith("Exception")):
         return None
     return name
+
+
+def _javascript_expected_error_expr(name: str) -> str:
+    if name in _JS_BUILTIN_ERRORS:
+        return name
+    return f"globalThis.{name}"
 
 
 def _javascript_call_args(
@@ -218,7 +259,7 @@ def synthesize_javascript_repro(
 
     expected_error = _javascript_expected_error(exception_type)
     expected_line = (
-        f"const expected_exception = {expected_error};\n\n"
+        f"const expected_exception = {_javascript_expected_error_expr(expected_error)};\n\n"
         if expected_error
         else ""
     )
@@ -229,7 +270,7 @@ def synthesize_javascript_repro(
   const mod = await import("../{rel}");
   const target = mod.{location.name} ?? mod.default ?? mod;
   const fn = typeof target === "function" ? target : target.{location.name};
-  fn({args});
+  await Promise.resolve(fn({args}));
 }});
 '''
 

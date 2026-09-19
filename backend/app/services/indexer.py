@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 
@@ -114,6 +114,7 @@ class ParameterInfo:
     annotation: str | None = None
     default_source: str | None = None
     default_is_simple_literal: bool = False
+    keyword_only: bool = False
 
 
 _SAFE_DEFAULT_SOURCE = re.compile(
@@ -205,6 +206,25 @@ def _python_parameter_info(child) -> ParameterInfo | None:
     )
 
 
+def _python_parameters_from_node(params) -> list[ParameterInfo]:
+    infos: list[ParameterInfo] = []
+    keyword_only = False
+    for child in params.children:
+        if child.type == "keyword_separator":
+            keyword_only = True
+            continue
+        if child.type == "list_splat_pattern":
+            keyword_only = True
+            continue
+        info = _python_parameter_info(child)
+        if info is None:
+            continue
+        if keyword_only and not info.keyword_only:
+            info = replace(info, keyword_only=True)
+        infos.append(info)
+    return infos
+
+
 def inspect_function_parameters(
     path: str, source: str, name: str
 ) -> list[ParameterInfo]:
@@ -222,15 +242,54 @@ def inspect_function_parameters(
             params = node.child_by_field_name("formal_parameters")
         if params is None:
             continue
+        if ext == ".py":
+            return _python_parameters_from_node(params)
         infos: list[ParameterInfo] = []
         for child in params.children:
-            if ext == ".py":
-                info = _python_parameter_info(child)
-            else:
-                info = _js_parameter_info(child)
+            info = _js_parameter_info(child)
             if info is not None:
                 infos.append(info)
         return infos
+    return []
+
+
+def _iter_class_methods(class_node):
+    body = class_node.child_by_field_name("body")
+    if body is None:
+        return
+    for child in body.children:
+        node = child
+        if node.type == "decorated_definition":
+            for sub in node.children:
+                if sub.type == "function_definition":
+                    yield sub
+        elif node.type == "function_definition":
+            yield node
+
+
+def inspect_class_init_parameters(
+    path: str, source: str, class_name: str
+) -> list[ParameterInfo]:
+    """Return ``__init__`` parameters for ``class_name``, or empty if none."""
+    if Path(path).suffix.lower() != ".py":
+        return []
+    parser = _PARSERS.get(".py")
+    if parser is None:
+        return []
+    tree = parser.parse(source.encode("utf-8"))
+    for node in _walk_nodes(tree.root_node):
+        if node.type != "class_definition":
+            continue
+        if _node_name(node) != class_name:
+            continue
+        for method in _iter_class_methods(node):
+            if _node_name(method) != "__init__":
+                continue
+            params = method.child_by_field_name("parameters")
+            if params is None:
+                return []
+            return _python_parameters_from_node(params)
+        return []
     return []
 
 
