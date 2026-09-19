@@ -27,7 +27,11 @@ SOURCE_FILES = {
 }
 
 TEST_SOURCE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-SEEDED_DIFF = "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
+SEEDED_DIFF = (
+    "diff --git a/backend/app/services/math.py b/backend/app/services/math.py\n"
+    "--- a/backend/app/services/math.py\n"
+    "+++ b/backend/app/services/math.py\n"
+)
 RETRY_DIFF = "diff --git a/y b/y\n--- a/y\n+++ b/y\n"
 
 
@@ -823,7 +827,10 @@ def test_apply_check_failure_skips_tests_and_feeds_retry(monkeypatch):
 
     monkeypatch.setattr(
         "app.workers.tasks.apply_diff_in_sandbox",
-        lambda sandbox, diff: (False, "git apply --check failed (exit 1): corrupt"),
+        lambda sandbox, diff, **kwargs: (
+            False,
+            "git apply --check failed (exit 1): corrupt",
+        ),
     )
     monkeypatch.setattr("app.workers.tasks.generate_patch", capture)
     monkeypatch.setattr(
@@ -1105,6 +1112,8 @@ def test_empty_diff_is_not_queued(monkeypatch):
         )
         assert pending == 0
         assert run.status == "failed"
-        assert run.current_diff.startswith("diff --git a/x")
+        assert run.current_diff.startswith(
+            "diff --git a/backend/app/services/math.py"
+        )
     finally:
         db.close()

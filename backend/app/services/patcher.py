@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 
 from app.config import settings
 from app.services.e2b_runner import MAX_FILE_BYTES, MAX_FILES, sanitize_log_text
+from app.services.patch_apply import validate_patch_paths
 from app.services.ripgrep import SearchTimedOut, search_in_files
 
 
@@ -505,7 +506,9 @@ def generate_patch(
         content = getattr(message, "content", None)
         if isinstance(message, dict):
             content = message.get("content")
+        diff = _extract_unified_diff(content or "")
+        validate_patch_paths(diff, path)
         return PatchGenerationResult(
-            diff=_extract_unified_diff(content or ""),
+            diff=diff,
             tokens_used=reported if saw_usage else None,
         )

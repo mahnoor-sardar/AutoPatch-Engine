@@ -204,7 +204,7 @@ def _stub_pr_publish(monkeypatch, *, head_sha=TEST_SOURCE_SHA, parent_sha=TEST_S
     )
     monkeypatch.setattr(
         "app.workers.tasks.apply_diff_in_sandbox",
-        lambda sandbox, diff: (True, None),
+        lambda sandbox, diff, **kwargs: (True, None),
     )
     monkeypatch.setattr(
         "app.workers.tasks.e2b_runner.checkout_head_sha",

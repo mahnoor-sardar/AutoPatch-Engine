@@ -31,7 +31,7 @@ def test_apply_runs_check_before_git_apply(monkeypatch):
         return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", fake_run)
-    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF)
+    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF, allowed_path="x")
     assert ok is True
     assert err == ""
     assert len(ran) == 2
@@ -52,7 +52,7 @@ def test_failed_check_skips_apply(monkeypatch):
         )
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", fake_run)
-    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF)
+    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF, allowed_path="x")
     assert ok is False
     assert len(ran) == 1
     assert "--check" in ran[0]
@@ -67,7 +67,7 @@ def test_apply_nonzero_exit_without_exception(monkeypatch):
         return SimpleNamespace(exit_code=2, stdout="", stderr="does not apply")
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", fake_run)
-    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF)
+    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF, allowed_path="x")
     assert ok is False
     assert "git apply failed (exit 2)" in err
     assert "does not apply" in err
@@ -85,7 +85,7 @@ def test_apply_exception_is_failure(monkeypatch):
         raise ApplyFailed()
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", fake_run)
-    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF)
+    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF, allowed_path="x")
     assert ok is False
     assert "git apply failed (exit 1)" in err
     assert "git apply died" in err
@@ -96,7 +96,7 @@ def test_empty_diff_is_not_applied(monkeypatch):
         raise AssertionError("sandbox command must not run")
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", boom)
-    ok, err = apply_diff_in_sandbox(_sandbox(), "  \n")
+    ok, err = apply_diff_in_sandbox(_sandbox(), "  \n", allowed_path="x")
     assert ok is False
     assert err == "no patch diff to apply"
 
@@ -110,7 +110,7 @@ def test_apply_error_sanitizes_secrets(monkeypatch):
         )
 
     monkeypatch.setattr("app.services.patch_apply.run_sandbox_command", fake_run)
-    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF)
+    ok, err = apply_diff_in_sandbox(_sandbox(), DIFF, allowed_path="x")
     assert ok is False
     assert "super-secret-value" not in err
     assert "[REDACTED]" in err

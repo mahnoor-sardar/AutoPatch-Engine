@@ -846,14 +846,21 @@ def apply_patch_and_verify(run_id: int) -> None:
             )
             db.commit()
             return
-        apply_ok, apply_err = apply_diff_in_sandbox(sandbox, run.current_diff)
-
         latest = (
             db.query(ReproductionAttempt)
             .filter(ReproductionAttempt.run_id == run.id)
             .order_by(ReproductionAttempt.id.desc())
             .first()
         )
+        allowed_path = ""
+        if latest is not None and latest.diagnostic_path:
+            allowed_path = latest.diagnostic_path
+        if not allowed_path:
+            apply_ok, apply_err = False, ""
+        else:
+            apply_ok, apply_err = apply_diff_in_sandbox(
+                sandbox, run.current_diff, allowed_path=allowed_path
+            )
         suite = None
         full = None
         if apply_ok and latest and latest.test_path and latest.test_source:
@@ -984,7 +991,18 @@ def open_github_pr(run_id: int) -> None:
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
         if run.current_diff:
-            apply_ok, apply_err = apply_diff_in_sandbox(sandbox, run.current_diff)
+            latest = (
+                db.query(ReproductionAttempt)
+                .filter(ReproductionAttempt.run_id == run.id)
+                .order_by(ReproductionAttempt.id.desc())
+                .first()
+            )
+            allowed_path = ""
+            if latest is not None and latest.diagnostic_path:
+                allowed_path = latest.diagnostic_path
+            apply_ok, apply_err = apply_diff_in_sandbox(
+                sandbox, run.current_diff, allowed_path=allowed_path
+            )
             if not apply_ok:
                 raise RuntimeError(apply_err or "git apply failed")
         applied_head = e2b_runner.checkout_head_sha(sandbox)

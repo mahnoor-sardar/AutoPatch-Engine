@@ -262,7 +262,7 @@ def test_open_github_pr_requests_write_token_after_merge_gate(monkeypatch):
     )
     monkeypatch.setattr(
         "app.workers.tasks.apply_diff_in_sandbox",
-        lambda sandbox, diff: (True, None),
+        lambda sandbox, diff, **kwargs: (True, None),
     )
     monkeypatch.setattr(
         "app.workers.tasks.e2b_runner.run_sandbox_command",
