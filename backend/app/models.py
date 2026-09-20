@@ -143,6 +143,16 @@ class SandboxRun(Base):
         default="provision",
     )
 
+    stage_owner_token: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    stage_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     approval_gates: Mapped[list["ApprovalGate"]] = relationship(
         back_populates="run"
     )

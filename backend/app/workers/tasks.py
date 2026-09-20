@@ -1,8 +1,10 @@
 import logging
+import uuid
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from celery.exceptions import MaxRetriesExceededError, Retry
+from sqlalchemy import or_
 
 from app.config import settings
 from app.db import SessionLocal
@@ -74,6 +76,8 @@ MAX_PATCH_ATTEMPTS = 5
 VERIFY_OUTPUT_LIMIT = 8000
 IDENTICAL_PATCH_ERROR = "identical patch rejected"
 EMPTY_PATCH_ERROR = "empty patch rejected"
+STAGE_LEASE_SECONDS = 120
+STAGE_LEASE_SLACK_SECONDS = 5
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "rejected", "killed"})
 WAITING_STATUSES = frozenset(
@@ -186,6 +190,116 @@ def _repair_stale_apply(db, run: SandboxRun) -> None:
     _ensure_finished_at(run)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _aware(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _new_stage_owner_token() -> str:
+    return uuid.uuid4().hex
+
+
+def _lease_is_active(expires_at, *, now=None) -> bool:
+    if expires_at is None:
+        return False
+    now = now or _utc_now()
+    return _aware(expires_at) > now
+
+
+def _grant_stage_ownership(run: SandboxRun, stage: str, started) -> None:
+    _mark_running(run, stage, started)
+    run.stage_owner_token = _new_stage_owner_token()
+    run.stage_lease_expires_at = _utc_now() + timedelta(seconds=STAGE_LEASE_SECONDS)
+
+
+def _owned_run_filter(run_id: int, owner_token: str, *, now=None):
+    now = now or _utc_now()
+    return (
+        SandboxRun.id == run_id,
+        SandboxRun.stage_owner_token == owner_token,
+        SandboxRun.status == "running",
+        SandboxRun.stage_lease_expires_at.isnot(None),
+        SandboxRun.stage_lease_expires_at > now,
+    )
+
+
+def _renew_stage_lease(
+    db, run: SandboxRun, owner_token: str, *, stage: str | None = None
+) -> bool:
+    if not owner_token:
+        return False
+    now = _utc_now()
+    slack = now - timedelta(seconds=STAGE_LEASE_SLACK_SECONDS)
+    expected = stage or run.pipeline_stage
+    expiry = now + timedelta(seconds=STAGE_LEASE_SECONDS)
+    count = (
+        db.query(SandboxRun)
+        .filter(
+            SandboxRun.id == run.id,
+            SandboxRun.stage_owner_token == owner_token,
+            SandboxRun.status == "running",
+            SandboxRun.pipeline_stage == expected,
+            or_(
+                SandboxRun.stage_lease_expires_at.is_(None),
+                SandboxRun.stage_lease_expires_at > slack,
+            ),
+        )
+        .update(
+            {"stage_lease_expires_at": expiry},
+            synchronize_session="fetch",
+        )
+    )
+    db.commit()
+    if count != 1:
+        return False
+    run.stage_lease_expires_at = expiry
+    return True
+
+
+def _still_owns_stage(
+    db, run: SandboxRun, owner_token: str, *, stage: str | None = None
+) -> bool:
+    if not owner_token:
+        return False
+    now = _utc_now()
+    expected = stage or run.pipeline_stage
+    row = (
+        db.query(SandboxRun.id)
+        .filter(
+            SandboxRun.id == run.id,
+            SandboxRun.stage_owner_token == owner_token,
+            SandboxRun.status == "running",
+            SandboxRun.pipeline_stage == expected,
+            SandboxRun.stage_lease_expires_at.isnot(None),
+            SandboxRun.stage_lease_expires_at > now,
+        )
+        .first()
+    )
+    return row is not None
+
+
+def _owned_update(db, run: SandboxRun, owner_token: str, **fields) -> bool:
+    if not owner_token or not fields:
+        return False
+    count = (
+        db.query(SandboxRun)
+        .filter(*_owned_run_filter(run.id, owner_token))
+        .update(fields, synchronize_session="fetch")
+    )
+    if count != 1:
+        return False
+    for name, value in fields.items():
+        setattr(run, name, value)
+    return True
+
+
 def _claim_clone_stage(db, run: SandboxRun, started) -> bool:
     run = _lock_run(db, run)
     if run.status in TERMINAL_STATUSES:
@@ -201,12 +315,14 @@ def _claim_clone_stage(db, run: SandboxRun, started) -> bool:
             _repair_stale_clone(run)
             db.commit()
             return False
-        _mark_running(run, STAGE_CLONE, started)
+        if _lease_is_active(run.stage_lease_expires_at):
+            return False
+        _grant_stage_ownership(run, STAGE_CLONE, started)
         db.commit()
         return True
     if run.status != "queued":
         return False
-    _mark_running(run, STAGE_CLONE, started)
+    _grant_stage_ownership(run, STAGE_CLONE, started)
     db.commit()
     return True
 
@@ -226,7 +342,9 @@ def _claim_apply_stage(db, run: SandboxRun, started) -> bool:
             _repair_stale_apply(db, run)
             db.commit()
             return False
-        _mark_running(run, STAGE_PATCH_APPLY, started)
+        if _lease_is_active(run.stage_lease_expires_at):
+            return False
+        _grant_stage_ownership(run, STAGE_PATCH_APPLY, started)
         db.commit()
         return True
     if run.status not in ("awaiting_patch_review", "queued"):
@@ -235,7 +353,7 @@ def _claim_apply_stage(db, run: SandboxRun, started) -> bool:
         STAGE_PATCH_APPLY
     ):
         return False
-    _mark_running(run, STAGE_PATCH_APPLY, started)
+    _grant_stage_ownership(run, STAGE_PATCH_APPLY, started)
     db.commit()
     return True
 
@@ -257,12 +375,14 @@ def _claim_pr_stage(db, run: SandboxRun, started) -> bool:
             run.status = "completed" if run.pr_url else "failed"
             db.commit()
             return False
-        _mark_running(run, STAGE_PR, started)
+        if _lease_is_active(run.stage_lease_expires_at):
+            return False
+        _grant_stage_ownership(run, STAGE_PR, started)
         db.commit()
         return True
     if run.status != "awaiting_merge":
         return False
-    _mark_running(run, STAGE_PR, started)
+    _grant_stage_ownership(run, STAGE_PR, started)
     db.commit()
     return True
 
@@ -349,22 +469,39 @@ def _llm_budget_exceeded(run: SandboxRun) -> bool:
     return budget > 0 and (run.llm_tokens_used or 0) >= budget
 
 
-def _queue_patch_for_review(db, run: SandboxRun, diff: str, started) -> None:
-    run.patch_attempts = (run.patch_attempts or 0) + 1
-    run.current_diff = diff
-    run.pipeline_stage = STAGE_PATCH_REVIEW
+def _queue_patch_for_review(
+    db, run: SandboxRun, diff: str, started, *, owner_token: str
+) -> bool:
+    if not _still_owns_stage(db, run, owner_token):
+        return False
+    attempts = (run.patch_attempts or 0) + 1
+    if not _owned_update(
+        db,
+        run,
+        owner_token,
+        patch_attempts=attempts,
+        current_diff=diff,
+        pipeline_stage=STAGE_PATCH_REVIEW,
+    ):
+        return False
     db.add(
         PatchAttempt(
             run_id=run.id,
-            attempt_number=run.patch_attempts,
+            attempt_number=attempts,
             diff=diff,
             status="pending_review",
         )
     )
     db.commit()
+    if not _still_owns_stage(db, run, owner_token):
+        return False
     create_pending_gate(db, run, PATCH_REVIEW_GATE)
-    _finish(run, started, "awaiting_patch_review")
+    if not _finish(
+        db, run, started, "awaiting_patch_review", owner_token=owner_token
+    ):
+        return False
     db.commit()
+    return True
 
 
 def _generate_retry_patch(
@@ -375,6 +512,7 @@ def _generate_retry_patch(
     latest,
     verify_err: str,
     started,
+    owner_token: str,
 ) -> None:
     previous_error = verify_err
     location_path = latest.diagnostic_path if latest else next(iter(files))
@@ -382,12 +520,28 @@ def _generate_retry_patch(
     diagnosis = _latest_diagnosis_text(db, run)
     test_source = latest.test_source if latest else ""
     while True:
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         if run.patch_attempts >= MAX_PATCH_ATTEMPTS:
-            _finish(run, started, "failed", "patch attempts exhausted")
+            _finish(
+                db,
+                run,
+                started,
+                "failed",
+                "patch attempts exhausted",
+                owner_token=owner_token,
+            )
             db.commit()
             return
         if _llm_budget_exceeded(run):
-            _finish(run, started, "failed", "LLM token budget exceeded")
+            _finish(
+                db,
+                run,
+                started,
+                "failed",
+                "LLM token budget exceeded",
+                owner_token=owner_token,
+            )
             db.commit()
             return
         try:
@@ -405,15 +559,31 @@ def _generate_retry_patch(
                 )
             )
         except LlmNotConfigured:
-            _finish(run, started, "failed", "LLM_API_KEY is not set")
+            _finish(
+                db,
+                run,
+                started,
+                "failed",
+                "LLM_API_KEY is not set",
+                owner_token=owner_token,
+            )
             db.commit()
             return
         except LlmTokenBudgetExceeded:
-            _finish(run, started, "failed", "LLM token budget exceeded")
+            _finish(
+                db,
+                run,
+                started,
+                "failed",
+                "LLM token budget exceeded",
+                owner_token=owner_token,
+            )
             db.commit()
             return
         except LlmRequestTimeout as exc:
             previous_error = _clip_verify_output(str(exc))
+            if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+                return
             run.patch_attempts = (run.patch_attempts or 0) + 1
             db.add(
                 PatchAttempt(
@@ -426,6 +596,8 @@ def _generate_retry_patch(
             )
             db.commit()
             continue
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         _add_llm_usage(run, generated.tokens_used)
         rejected = (
             EMPTY_PATCH_ERROR
@@ -448,7 +620,9 @@ def _generate_retry_patch(
             )
             db.commit()
             continue
-        _queue_patch_for_review(db, run, generated.diff, started)
+        _queue_patch_for_review(
+            db, run, generated.diff, started, owner_token=owner_token
+        )
         return
 
 
@@ -478,12 +652,56 @@ def _verification_failure(*, apply_err: str, suite, full) -> str:
     return ""
 
 
-def _finish(run: SandboxRun, started, status: str, error: str | None = None):
-    finished = datetime.now(timezone.utc)
+def _finish(
+    db,
+    run: SandboxRun,
+    started,
+    status: str,
+    error: str | None = None,
+    *,
+    owner_token: str | None,
+) -> bool:
+    if not owner_token:
+        return False
+    finished = _utc_now()
+    start = started or run.started_at
+    if start is not None and getattr(start, "tzinfo", None) is None:
+        start = start.replace(tzinfo=timezone.utc)
+    duration = None
+    if start is not None:
+        duration = int((finished - start).total_seconds() * 1000)
+    count = (
+        db.query(SandboxRun)
+        .filter(*_owned_run_filter(run.id, owner_token))
+        .update(
+            {
+                "status": status,
+                "error": error,
+                "finished_at": finished,
+                "duration_ms": duration,
+                "stage_owner_token": None,
+                "stage_lease_expires_at": None,
+            },
+            synchronize_session="fetch",
+        )
+    )
+    if count != 1:
+        return False
     run.status = status
     run.error = error
     run.finished_at = finished
-    run.duration_ms = int((finished - started).total_seconds() * 1000)
+    run.duration_ms = duration
+    run.stage_owner_token = None
+    run.stage_lease_expires_at = None
+    return True
+
+
+def _persisted_pr_url(db, run_id: int) -> str | None:
+    return (
+        db.query(SandboxRun.pr_url)
+        .filter(SandboxRun.id == run_id)
+        .scalar()
+    )
 
 
 def _required_source_sha(run: SandboxRun) -> str:
@@ -508,6 +726,7 @@ def clone_and_index(run_id: int) -> None:
     sandbox = None
     started = datetime.now(timezone.utc)
     log_stack = ExitStack()
+    owner_token = None
     try:
         run = _load_run(db, run_id)
         gate = _require_gate_or_retry(clone_and_index, db, run, "sandbox_provision")
@@ -519,6 +738,7 @@ def clone_and_index(run_id: int) -> None:
 
         if not _claim_clone_stage(db, run, started):
             return
+        owner_token = run.stage_owner_token
 
         notify_run_event(db, run, "Sandbox running", f"{run.repo} clone started")
         repo = (
@@ -538,34 +758,50 @@ def clone_and_index(run_id: int) -> None:
                 pin = e2b_runner.parse_git_sha(run.source_sha)
             except ValueError:
                 pin = None
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+            return
         sandbox, files = _clone_run_sources(run, token, sha=pin)
         head = e2b_runner.checkout_head_sha(sandbox)
         if pin and head != pin:
             raise RuntimeError(
                 f"checkout HEAD {head} does not match source_sha {pin}"
             )
-        run.source_sha = head
-        run.e2b_sandbox_id = sandbox.sandbox_id
+        if not _owned_update(
+            db,
+            run,
+            owner_token,
+            source_sha=head,
+            e2b_sandbox_id=sandbox.sandbox_id,
+        ):
+            return
         db.commit()
 
         install_code, _install_out, install_err = (
             e2b_runner.install_project_dependencies(sandbox)
         )
         if install_code != 0:
-            _finish(
+            if _finish(
+                db,
                 run,
                 started,
                 "failed",
                 f"dependency install failed: {install_err[:500]}",
-            )
-            db.commit()
-            notify_run_event(db, run, "Run failed", "dependency install failed")
+                owner_token=owner_token,
+            ):
+                db.commit()
+                notify_run_event(db, run, "Run failed", "dependency install failed")
             return
 
         if _control_or_stop(db, run):
             return
 
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
+            return
         rows = indexer.index_files(files)
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+            return
         db.bulk_insert_mappings(
             Symbol,
             [
@@ -583,9 +819,9 @@ def clone_and_index(run_id: int) -> None:
         store_symbol_embeddings(db, run.id)
 
         def fail_incomplete(reason: str) -> None:
-            _finish(run, started, "failed", reason)
-            db.commit()
-            notify_run_event(db, run, "Run failed", reason[:180])
+            if _finish(db, run, started, "failed", reason, owner_token=owner_token):
+                db.commit()
+                notify_run_event(db, run, "Run failed", reason[:180])
 
         if not run.stack_trace:
             fail_incomplete("missing stack_trace")
@@ -622,6 +858,8 @@ def clone_and_index(run_id: int) -> None:
             fail_incomplete("source file not found")
             return
 
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
+            return
         try:
             reproduction = synthesize_repro(
                 location=location,
@@ -630,19 +868,20 @@ def clone_and_index(run_id: int) -> None:
                 message=parsed_trace.message,
             )
         except ValueError as exc:
-            db.add(
-                ReproductionAttempt(
-                    run_id=run.id,
-                    stack_trace=run.stack_trace,
-                    diagnostic_path=location.path,
-                    diagnostic_name=location.name,
-                    diagnostic_line=location.start_line,
-                    reproduced=False,
-                    stderr=str(exc),
+            if _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+                db.add(
+                    ReproductionAttempt(
+                        run_id=run.id,
+                        stack_trace=run.stack_trace,
+                        diagnostic_path=location.path,
+                        diagnostic_name=location.name,
+                        diagnostic_line=location.start_line,
+                        reproduced=False,
+                        stderr=str(exc),
+                    )
                 )
-            )
-            db.commit()
-            fail_incomplete(str(exc) or "reproduction synthesis failed")
+                db.commit()
+                fail_incomplete(str(exc) or "reproduction synthesis failed")
             return
 
         result = run_reproduction_test(
@@ -651,6 +890,8 @@ def clone_and_index(run_id: int) -> None:
             test_source=reproduction.test_source,
             install_dependencies=False,
         )
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+            return
         attempt = ReproductionAttempt(
             run_id=run.id,
             stack_trace=run.stack_trace,
@@ -673,6 +914,8 @@ def clone_and_index(run_id: int) -> None:
 
         diagnosis = None
         try:
+            if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
+                return
             diagnosis = diagnose_reproduction(
                 path=location.path,
                 name=location.name,
@@ -683,16 +926,17 @@ def clone_and_index(run_id: int) -> None:
                 stderr=result.stderr,
                 stack_trace=run.stack_trace,
             )
-            log_audit(
-                db,
-                "diagnosis",
-                run.id,
-                None,
-                diagnosis,
-                actor=ACTOR_WORKER,
-                result=RESULT_SUCCESS,
-            )
-            db.commit()
+            if _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+                log_audit(
+                    db,
+                    "diagnosis",
+                    run.id,
+                    None,
+                    diagnosis,
+                    actor=ACTOR_WORKER,
+                    result=RESULT_SUCCESS,
+                )
+                db.commit()
         except Exception:
             logger.exception("gemini diagnosis failed")
 
@@ -700,6 +944,8 @@ def clone_and_index(run_id: int) -> None:
             fail_incomplete("stopped after reproduction")
             return
         try:
+            if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
+                return
             generated = _as_patch_result(
                 generate_patch(
                     path=location.path,
@@ -713,61 +959,68 @@ def clone_and_index(run_id: int) -> None:
                 )
             )
             _add_llm_usage(run, generated.tokens_used)
-            _queue_patch_for_review(
-                db, run, generated.diff, started
+            if not _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+                return
+            queued = _queue_patch_for_review(
+                db, run, generated.diff, started, owner_token=owner_token
             )
-            notify_run_event(
-                db,
-                run,
-                "Patch ready for review",
-                f"{run.repo} diff waiting on Android",
-                {"has_diff": "true"},
-            )
+            if queued:
+                notify_run_event(
+                    db,
+                    run,
+                    "Patch ready for review",
+                    f"{run.repo} diff waiting on Android",
+                    {"has_diff": "true"},
+                )
             return
         except LlmNotConfigured as exc:
-            _finish(run, started, "failed", str(exc))
-            db.commit()
-            notify_run_event(
-                db, run, "Run failed", str(exc)[:180]
-            )
+            if _finish(db, run, started, "failed", str(exc), owner_token=owner_token):
+                db.commit()
+                notify_run_event(
+                    db, run, "Run failed", str(exc)[:180]
+                )
             return
         except LlmTokenBudgetExceeded:
-            _finish(
+            if _finish(
+                db,
                 run,
                 started,
                 "failed",
                 "LLM token budget exceeded",
-            )
-            db.commit()
-            notify_run_event(
-                db,
-                run,
-                "Run failed",
-                "LLM token budget exceeded",
-            )
+                owner_token=owner_token,
+            ):
+                db.commit()
+                notify_run_event(
+                    db,
+                    run,
+                    "Run failed",
+                    "LLM token budget exceeded",
+                )
             return
         except LlmRequestTimeout as exc:
-            _finish(run, started, "failed", str(exc))
-            db.commit()
-            notify_run_event(
-                db, run, "Run failed", str(exc)[:180]
-            )
+            if _finish(db, run, started, "failed", str(exc), owner_token=owner_token):
+                db.commit()
+                notify_run_event(
+                    db, run, "Run failed", str(exc)[:180]
+                )
             return
         except Exception:
             logger.exception("patch generation failed")
-            _finish(
+            if _finish(
+                db,
                 run,
                 started,
                 "failed",
                 "patch generation failed",
-            )
-            db.commit()
-            notify_run_event(
-                db,
-                run,
-                "Run failed",
-                "patch generation failed",
-            )
+                owner_token=owner_token,
+            ):
+                db.commit()
+                notify_run_event(
+                    db,
+                    run,
+                    "Run failed",
+                    "patch generation failed",
+                )
             return
     except Retry:
         raise
@@ -779,9 +1032,11 @@ def clone_and_index(run_id: int) -> None:
         run = _load_run(db, run_id)
         if run.status in PROTECTED_STATUSES:
             return
-        _finish(run, started, "failed", str(exc))
-        db.commit()
-        notify_run_event(db, run, "Run failed", str(exc)[:180])
+        if owner_token and _finish(
+            db, run, started, "failed", str(exc), owner_token=owner_token
+        ):
+            db.commit()
+            notify_run_event(db, run, "Run failed", str(exc)[:180])
         raise
     finally:
         log_stack.close()
@@ -803,6 +1058,7 @@ def apply_patch_and_verify(run_id: int) -> None:
     sandbox = None
     started = datetime.now(timezone.utc)
     log_stack = ExitStack()
+    owner_token = None
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, PATCH_REVIEW_GATE)
@@ -810,15 +1066,22 @@ def apply_patch_and_verify(run_id: int) -> None:
             return
         if not _claim_apply_stage(db, run, started):
             return
+        owner_token = run.stage_owner_token
         if not run.current_diff:
-            _finish(run, started, "failed", "no patch diff to apply")
-            db.commit()
+            if _finish(
+                db, run, started, "failed", "no patch diff to apply",
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
         try:
             source_sha = _required_source_sha(run)
         except RuntimeError:
-            _finish(run, started, "failed", "source_sha is required")
-            db.commit()
+            if _finish(
+                db, run, started, "failed", "source_sha is required",
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
 
         repo = (
@@ -832,25 +1095,34 @@ def apply_patch_and_verify(run_id: int) -> None:
             PERMISSIONS_REPO_READ,
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         sandbox, files = _clone_run_sources(run, token, sha=source_sha)
         head = e2b_runner.checkout_head_sha(sandbox)
         if head != source_sha:
             raise RuntimeError(
                 f"checkout HEAD {head} does not match source_sha {source_sha}"
             )
-        run.e2b_sandbox_id = sandbox.sandbox_id
+        if not _owned_update(
+            db, run, owner_token, e2b_sandbox_id=sandbox.sandbox_id
+        ):
+            return
         db.commit()
         install_code, _out, install_err = e2b_runner.install_project_dependencies(
             sandbox
         )
         if install_code != 0:
-            _finish(
+            if _finish(
+                db,
                 run,
                 started,
                 "failed",
                 f"dependency install failed: {install_err[:500]}",
-            )
-            db.commit()
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
         latest = (
             db.query(ReproductionAttempt)
@@ -858,18 +1130,24 @@ def apply_patch_and_verify(run_id: int) -> None:
             .order_by(ReproductionAttempt.id.desc())
             .first()
         )
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         allowed_path = ""
         if latest is not None and latest.diagnostic_path:
             allowed_path = latest.diagnostic_path
         if not allowed_path:
             apply_ok, apply_err = False, ""
         else:
+            if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+                return
             apply_ok, apply_err = apply_diff_in_sandbox(
                 sandbox, run.current_diff, allowed_path=allowed_path
             )
         suite = None
         full = None
         if apply_ok and latest and latest.test_path and latest.test_source:
+            if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+                return
             suite = run_reproduction_test(
                 sandbox,
                 latest.test_path,
@@ -893,6 +1171,8 @@ def apply_patch_and_verify(run_id: int) -> None:
         )
         if not tests_pass and not verify_err:
             verify_err = "verification could not be completed"
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         record = (
             db.query(PatchAttempt)
             .filter(PatchAttempt.run_id == run.id)
@@ -914,23 +1194,39 @@ def apply_patch_and_verify(run_id: int) -> None:
             db.commit()
 
         if tests_pass:
-            run.pipeline_stage = STAGE_MERGE
+            if not _owned_update(
+                db, run, owner_token, pipeline_stage=STAGE_MERGE
+            ):
+                return
+            if not _still_owns_stage(db, run, owner_token):
+                return
             create_pending_gate(db, run, MERGE_GATE)
-            _finish(run, started, "awaiting_merge")
-            db.commit()
-            notify_run_event(
-                db,
-                run,
-                "Merge OTP required",
-                extra_suite_merge_message(run.repo, full),
-            )
+            if _finish(
+                db, run, started, "awaiting_merge", owner_token=owner_token
+            ):
+                db.commit()
+                notify_run_event(
+                    db,
+                    run,
+                    "Merge OTP required",
+                    extra_suite_merge_message(run.repo, full),
+                )
             return
 
         if run.patch_attempts >= MAX_PATCH_ATTEMPTS:
-            _finish(run, started, "failed", "patch attempts exhausted")
-            db.commit()
+            if _finish(
+                db,
+                run,
+                started,
+                "failed",
+                "patch attempts exhausted",
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
 
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
         _generate_retry_patch(
             db,
             run,
@@ -938,14 +1234,17 @@ def apply_patch_and_verify(run_id: int) -> None:
             latest=latest,
             verify_err=verify_err,
             started=started,
+            owner_token=owner_token,
         )
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)
         if run.status in PROTECTED_STATUSES:
             return
-        _finish(run, started, "failed", str(exc))
-        db.commit()
+        if owner_token and _finish(
+            db, run, started, "failed", str(exc), owner_token=owner_token
+        ):
+            db.commit()
         raise
     finally:
         log_stack.close()
@@ -963,6 +1262,7 @@ def open_github_pr(run_id: int) -> None:
     sandbox = None
     started = datetime.now(timezone.utc)
     log_stack = ExitStack()
+    owner_token = None
     try:
         run = _load_run(db, run_id)
         _require_gate(db, run, MERGE_GATE)
@@ -970,11 +1270,15 @@ def open_github_pr(run_id: int) -> None:
             return
         if not _claim_pr_stage(db, run, started):
             return
+        owner_token = run.stage_owner_token
         try:
             source_sha = _required_source_sha(run)
         except RuntimeError:
-            _finish(run, started, "failed", "source_sha is required")
-            db.commit()
+            if _finish(
+                db, run, started, "failed", "source_sha is required",
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
         latest = (
             db.query(ReproductionAttempt)
@@ -987,13 +1291,15 @@ def open_github_pr(run_id: int) -> None:
             or not (latest.test_path or "").strip()
             or not (latest.test_source or "").strip()
         ):
-            _finish(
+            if _finish(
+                db,
                 run,
                 started,
                 "failed",
                 "cannot create PR: verified reproduction test is missing",
-            )
-            db.commit()
+                owner_token=owner_token,
+            ):
+                db.commit()
             return
         repo = (
             db.query(Repository)
@@ -1007,15 +1313,26 @@ def open_github_pr(run_id: int) -> None:
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, read_token))
         branch = f"autopatch/run-{run.id}"
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+            return
         sandbox, _files = _clone_run_sources(run, read_token, sha=source_sha)
         head = e2b_runner.checkout_head_sha(sandbox)
         if head != source_sha:
             raise RuntimeError(
                 f"checkout HEAD {head} does not match source_sha {source_sha}"
             )
-        run.e2b_sandbox_id = sandbox.sandbox_id
+        if not _owned_update(
+            db, run, owner_token, e2b_sandbox_id=sandbox.sandbox_id
+        ):
+            return
         db.commit()
         if run.current_diff:
+            if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
+                return
+            if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+                return
             allowed_path = ""
             if latest.diagnostic_path:
                 allowed_path = latest.diagnostic_path
@@ -1032,8 +1349,14 @@ def open_github_pr(run_id: int) -> None:
         try:
             test_path = validate_reproduction_test_path(latest.test_path)
         except ReproductionTestPathError as exc:
-            _finish(run, started, "failed", str(exc))
-            db.commit()
+            if _finish(
+                db, run, started, "failed", str(exc), owner_token=owner_token
+            ):
+                db.commit()
+            return
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
             return
         write_sandbox_file(
             sandbox,
@@ -1061,6 +1384,12 @@ def open_github_pr(run_id: int) -> None:
             PERMISSIONS_PR_WRITE,
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, write_token))
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
+            return
+        if _persisted_pr_url(db, run.id):
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+            return
         e2b_runner.push_branch(sandbox, branch, write_token)
         patch = _latest_patch_attempt(db, run)
         merge_gate = (
@@ -1072,6 +1401,18 @@ def open_github_pr(run_id: int) -> None:
             .order_by(ApprovalGate.id.desc())
             .first()
         )
+        if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
+            return
+        existing_pr = _persisted_pr_url(db, run.id)
+        if existing_pr:
+            if _owned_update(db, run, owner_token, pr_url=existing_pr):
+                if _finish(
+                    db, run, started, "completed", owner_token=owner_token
+                ):
+                    db.commit()
+            return
+        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+            return
         pr = create_pull_request(
             token=write_token,
             repo=run.repo,
@@ -1099,8 +1440,11 @@ def open_github_pr(run_id: int) -> None:
             head=branch,
             base=run.ref or "main",
         )
-        run.pr_url = pr.get("html_url")
-        _finish(run, started, "completed")
+        pr_url = pr.get("html_url")
+        if not _owned_update(db, run, owner_token, pr_url=pr_url):
+            return
+        if not _finish(db, run, started, "completed", owner_token=owner_token):
+            return
         log_audit(
             db,
             "pr_opened",
@@ -1118,8 +1462,10 @@ def open_github_pr(run_id: int) -> None:
         run = _load_run(db, run_id)
         if run.status in PROTECTED_STATUSES:
             return
-        _finish(run, started, "failed", str(exc))
-        db.commit()
+        if owner_token and _finish(
+            db, run, started, "failed", str(exc), owner_token=owner_token
+        ):
+            db.commit()
         raise
     finally:
         log_stack.close()
