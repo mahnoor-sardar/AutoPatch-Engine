@@ -279,7 +279,7 @@ def _git_apply_error(label: str, result=None, exc: BaseException | None = None) 
 def apply_diff_in_sandbox(
     sandbox, diff: str, *, allowed_path: str
 ) -> tuple[bool, str]:
-    """Validate paths, normalize targets, `git apply --check`, then `git apply`."""
+    """Validate paths, `git apply --check`, then `git apply` the approved diff."""
     if not (diff or "").strip():
         return False, "no patch diff to apply"
     if not (allowed_path or "").strip():
@@ -289,7 +289,6 @@ def apply_diff_in_sandbox(
     except ValueError as exc:
         return False, str(exc)
     _write_sandbox_diff(sandbox, diff)
-    normalize_sandbox_patch_targets(sandbox, diff)
     check_cmd = f"cd {REPO_ROOT} && git apply --check {DIFF_PATH}"
     apply_cmd = f"cd {REPO_ROOT} && git apply {DIFF_PATH}"
     try:
