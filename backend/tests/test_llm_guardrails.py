@@ -34,7 +34,8 @@ def test_normalize_diff_ignores_index_and_timestamps():
         "index abc123..def456 100644\n"
         "--- a/x.py\t2024-01-01\n"
         "+++ b/x.py\t2024-01-02\n"
-        "+fixed  \r\n"
+        "+fixed\r\n"
+        "\n"
     )
     right = (
         "diff --git a/x.py b/x.py\n"
@@ -45,6 +46,40 @@ def test_normalize_diff_ignores_index_and_timestamps():
     assert diffs_are_identical(left, right)
     assert normalize_unified_diff("") == ""
     assert normalize_unified_diff("\n\n") == ""
+
+
+def _payload_diff(body_line: str) -> str:
+    return (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        f"{body_line}\n"
+    )
+
+
+def test_normalize_diff_preserves_hunk_payload_trailing_whitespace():
+    assert not diffs_are_identical(_payload_diff("+fixed  "), _payload_diff("+fixed"))
+    assert not diffs_are_identical(_payload_diff("+fixed\t"), _payload_diff("+fixed"))
+    assert not diffs_are_identical(_payload_diff("+  "), _payload_diff("+"))
+    assert not diffs_are_identical(_payload_diff("-old  "), _payload_diff("-old"))
+    assert not diffs_are_identical(_payload_diff(" keep  "), _payload_diff(" keep"))
+
+
+def test_normalize_diff_same_payload_ignores_index_and_timestamps():
+    left = (
+        "diff --git a/x.py b/x.py\n"
+        "index abc123..def456 100644\n"
+        "--- a/x.py\t2024-01-01\n"
+        "+++ b/x.py\t2024-01-02\n"
+        "+fixed  \n"
+    )
+    right = (
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "+fixed  \n"
+    )
+    assert diffs_are_identical(left, right)
 
 
 def test_usage_tokens_missing_is_none():

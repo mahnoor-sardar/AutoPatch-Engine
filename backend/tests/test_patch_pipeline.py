@@ -987,6 +987,60 @@ def test_identical_diff_does_not_requeue_review(monkeypatch):
     assert IDENTICAL_PATCH_ERROR in generated
 
 
+def test_trailing_whitespace_diff_is_not_identical_retry(monkeypatch):
+    from app.workers.tasks import IDENTICAL_PATCH_ERROR
+
+    spaced = SEEDED_DIFF + "+fixed  \n"
+    run_id = _seed_apply_verify_run()
+    db = SessionLocal()
+    try:
+        run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+        run.current_diff = SEEDED_DIFF + "+fixed\n"
+        record = (
+            db.query(PatchAttempt)
+            .filter(PatchAttempt.run_id == run_id)
+            .order_by(PatchAttempt.id.desc())
+            .first()
+        )
+        record.diff = run.current_diff
+        db.commit()
+    finally:
+        db.close()
+    _stub_apply_verify(monkeypatch)
+    _stub_failed_follow_on_suite(monkeypatch)
+    monkeypatch.setattr(
+        "app.workers.tasks.generate_patch",
+        lambda **kwargs: spaced,
+    )
+    apply_patch_and_verify.run(run_id)
+    db = SessionLocal()
+    try:
+        run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+        identical = (
+            db.query(PatchAttempt)
+            .filter(
+                PatchAttempt.run_id == run_id,
+                PatchAttempt.stderr == IDENTICAL_PATCH_ERROR,
+            )
+            .count()
+        )
+        pending = (
+            db.query(ApprovalGate)
+            .filter(
+                ApprovalGate.run_id == run_id,
+                ApprovalGate.gate == "patch_review",
+                ApprovalGate.status == "pending",
+            )
+            .count()
+        )
+        assert identical == 0
+        assert pending == 1
+        assert run.status == "awaiting_patch_review"
+        assert run.current_diff == spaced
+    finally:
+        db.close()
+
+
 def test_retry_persists_reported_token_usage(monkeypatch):
     from app.services.patcher import PatchGenerationResult
 

@@ -367,17 +367,22 @@ def usage_tokens_from_response(response) -> int | None:
     return int(prompt or 0) + int(completion or 0)
 
 
+_HUNK_PAYLOAD_PREFIXES = frozenset({" ", "+", "-", "\\"})
+
+
 def normalize_unified_diff(diff: str | None) -> str:
     text = (diff or "").replace("\r\n", "\n").replace("\r", "\n")
     kept: list[str] = []
     for line in text.split("\n"):
-        stripped = line.rstrip()
-        if stripped.startswith("index "):
+        if line.startswith("index "):
             continue
-        if stripped.startswith("--- ") or stripped.startswith("+++ "):
-            kept.append(stripped.split("\t", 1)[0])
+        if line.startswith("--- ") or line.startswith("+++ "):
+            kept.append(line.split("\t", 1)[0].rstrip())
             continue
-        kept.append(stripped)
+        if line[:1] in _HUNK_PAYLOAD_PREFIXES:
+            kept.append(line)
+            continue
+        kept.append(line)
     while kept and kept[-1] == "":
         kept.pop()
     if not kept:
