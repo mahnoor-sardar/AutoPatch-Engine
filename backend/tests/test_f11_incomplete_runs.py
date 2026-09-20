@@ -16,6 +16,7 @@ from tests.test_patch_pipeline import (
     _approve,
     _fake_sandbox,
     _seed_run,
+    _seed_verified_pr_records,
     _stub_repro_pipeline,
 )
 from tests.test_run_state import LockDB, _now
@@ -267,6 +268,7 @@ def test_genuine_pr_completion_counts_successful(monkeypatch):
         source_sha=TEST_SOURCE_SHA,
     )
     _approve(run_id, "merge")
+    _seed_verified_pr_records(run_id)
     _stub_pr_publish(monkeypatch)
     before = _stats()["successful"]
     open_github_pr.run(run_id)

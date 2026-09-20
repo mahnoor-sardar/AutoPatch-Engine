@@ -19,6 +19,7 @@ from tests.test_patch_pipeline import (
     _fake_sandbox,
     _seed_apply_verify_run,
     _seed_run,
+    _seed_verified_pr_records,
     _stub_apply_verify,
     _stub_failed_follow_on_suite,
 )
@@ -248,6 +249,7 @@ def test_open_github_pr_requests_write_token_after_merge_gate(monkeypatch):
         source_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     _approve(run_id, "merge")
+    _seed_verified_pr_records(run_id)
 
     def capture(installation_id, owner_repo, permissions):
         seen.append(permissions)

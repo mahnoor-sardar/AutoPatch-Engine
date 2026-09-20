@@ -42,13 +42,19 @@ from app.services.github_app import (
     installation_token_for_repo,
 )
 from app.services.gemini import diagnose_reproduction
-from app.services.github_pr import create_pull_request
+from app.services.github_pr import (
+    ReproductionTestPathError,
+    build_pr_body,
+    create_pull_request,
+    validate_reproduction_test_path,
+)
 from app.services.harness import (
     ADDITIONAL_TESTS_SKIPPED,
     extra_suite_merge_message,
     extra_suite_ok,
     run_full_test_suite,
     run_reproduction_test,
+    write_sandbox_file,
 )
 from app.services.patcher import (
     LlmNotConfigured,
@@ -970,6 +976,25 @@ def open_github_pr(run_id: int) -> None:
             _finish(run, started, "failed", "source_sha is required")
             db.commit()
             return
+        latest = (
+            db.query(ReproductionAttempt)
+            .filter(ReproductionAttempt.run_id == run.id)
+            .order_by(ReproductionAttempt.id.desc())
+            .first()
+        )
+        if (
+            latest is None
+            or not (latest.test_path or "").strip()
+            or not (latest.test_source or "").strip()
+        ):
+            _finish(
+                run,
+                started,
+                "failed",
+                "cannot create PR: verified reproduction test is missing",
+            )
+            db.commit()
+            return
         repo = (
             db.query(Repository)
             .filter(Repository.full_name == run.repo)
@@ -991,14 +1016,8 @@ def open_github_pr(run_id: int) -> None:
         run.e2b_sandbox_id = sandbox.sandbox_id
         db.commit()
         if run.current_diff:
-            latest = (
-                db.query(ReproductionAttempt)
-                .filter(ReproductionAttempt.run_id == run.id)
-                .order_by(ReproductionAttempt.id.desc())
-                .first()
-            )
             allowed_path = ""
-            if latest is not None and latest.diagnostic_path:
+            if latest.diagnostic_path:
                 allowed_path = latest.diagnostic_path
             apply_ok, apply_err = apply_diff_in_sandbox(
                 sandbox, run.current_diff, allowed_path=allowed_path
@@ -1010,6 +1029,17 @@ def open_github_pr(run_id: int) -> None:
             raise RuntimeError(
                 f"checkout HEAD {applied_head} does not match source_sha {source_sha}"
             )
+        try:
+            test_path = validate_reproduction_test_path(latest.test_path)
+        except ReproductionTestPathError as exc:
+            _finish(run, started, "failed", str(exc))
+            db.commit()
+            return
+        write_sandbox_file(
+            sandbox,
+            f"/home/user/repo/{test_path}",
+            latest.test_source,
+        )
         e2b_runner.run_sandbox_command(
             sandbox,
             "cd /home/user/repo && "
@@ -1032,11 +1062,40 @@ def open_github_pr(run_id: int) -> None:
         )
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, write_token))
         e2b_runner.push_branch(sandbox, branch, write_token)
+        patch = _latest_patch_attempt(db, run)
+        merge_gate = (
+            db.query(ApprovalGate)
+            .filter(
+                ApprovalGate.run_id == run.id,
+                ApprovalGate.gate == MERGE_GATE,
+            )
+            .order_by(ApprovalGate.id.desc())
+            .first()
+        )
         pr = create_pull_request(
             token=write_token,
             repo=run.repo,
             title=f"AutoPatch: verified fix for run {run.id}",
-            body="Verified reproduction and tests. Android merge OTP approved.",
+            body=build_pr_body(
+                run_id=run.id,
+                repo=run.repo,
+                ref=run.ref,
+                source_sha=run.source_sha,
+                diagnostic_path=latest.diagnostic_path,
+                test_path=test_path,
+                reproduced=latest.reproduced,
+                reproduction_exit_code=latest.exit_code,
+                patch_attempt_id=patch.id if patch is not None else None,
+                patch_status=patch.status if patch is not None else None,
+                patch_stdout=patch.stdout if patch is not None else None,
+                current_diff=run.current_diff,
+                merge_approved_at=(
+                    merge_gate.approved_at if merge_gate is not None else None
+                ),
+                approval_device_id=(
+                    merge_gate.device_id if merge_gate is not None else None
+                ),
+            ),
             head=branch,
             base=run.ref or "main",
         )

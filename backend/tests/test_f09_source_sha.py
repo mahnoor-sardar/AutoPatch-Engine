@@ -12,6 +12,7 @@ from tests.test_patch_pipeline import (
     _fake_sandbox,
     _seed_apply_verify_run,
     _seed_run,
+    _seed_verified_pr_records,
     _stub_apply_verify,
     _stub_failed_follow_on_suite,
 )
@@ -239,6 +240,7 @@ def test_open_github_pr_binds_parent_and_keeps_ref_base(monkeypatch):
         ref="release",
     )
     _approve(run_id, "merge")
+    _seed_verified_pr_records(run_id)
     cloned, pushed, prs = _stub_pr_publish(monkeypatch)
     open_github_pr.run(run_id)
     assert cloned[0]["sha"] == TEST_SOURCE_SHA
@@ -265,6 +267,7 @@ def test_open_github_pr_aborts_on_head_mismatch(monkeypatch):
         source_sha=TEST_SOURCE_SHA,
     )
     _approve(run_id, "merge")
+    _seed_verified_pr_records(run_id)
     cloned, pushed, prs = _stub_pr_publish(monkeypatch, head_sha=OTHER_SHA)
     try:
         open_github_pr.run(run_id)
@@ -285,6 +288,7 @@ def test_open_github_pr_aborts_on_parent_mismatch(monkeypatch):
         source_sha=TEST_SOURCE_SHA,
     )
     _approve(run_id, "merge")
+    _seed_verified_pr_records(run_id)
     _cloned, pushed, prs = _stub_pr_publish(monkeypatch, parent_sha=OTHER_SHA)
     try:
         open_github_pr.run(run_id)

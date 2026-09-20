@@ -99,6 +99,50 @@ def _approve(run_id, gate):
         db.close()
 
 
+def _seed_verified_pr_records(
+    run_id,
+    *,
+    diagnostic_path="backend/app/services/math.py",
+    test_path="tests/autopatch_repro_test.py",
+    test_source="def test_repro(): pass\n",
+    reproduced=True,
+    exit_code=1,
+    patch_status="applied",
+    patch_stdout=None,
+    current_diff=None,
+):
+    db = SessionLocal()
+    try:
+        run = db.query(SandboxRun).filter(SandboxRun.id == run_id).one()
+        diff = current_diff if current_diff is not None else (run.current_diff or "\n")
+        db.add(
+            ReproductionAttempt(
+                run_id=run_id,
+                stack_trace=STACK_TRACE,
+                diagnostic_path=diagnostic_path,
+                diagnostic_name="calculate",
+                diagnostic_line=2,
+                test_path=test_path,
+                test_source=test_source,
+                reproduced=reproduced,
+                exit_code=exit_code,
+                stderr="ZeroDivisionError",
+            )
+        )
+        db.add(
+            PatchAttempt(
+                run_id=run_id,
+                attempt_number=run.patch_attempts or 1,
+                diff=diff,
+                status=patch_status,
+                stdout=patch_stdout,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 def _fake_sandbox():
     def _run(command="", *a, **k):
         stdout = ""

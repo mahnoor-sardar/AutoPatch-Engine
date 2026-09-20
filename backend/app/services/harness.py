@@ -108,6 +108,10 @@ def _write_file(sandbox, path: str, content: str) -> None:
     sandbox.files.write(path, content)
 
 
+def write_sandbox_file(sandbox, path: str, content: str) -> None:
+    _write_file(sandbox, path, content)
+
+
 def _run_command(sandbox, command: str, timeout: int):
     return run_sandbox_command(sandbox, command, timeout)
 
