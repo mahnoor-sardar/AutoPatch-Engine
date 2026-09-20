@@ -107,6 +107,7 @@ def test_worker_persists_reproduction_attempt(monkeypatch):
         ref,
         token,
         sha=None,
+        on_created=None,
     ):
         return fake_sandbox, SOURCE_FILES
 

@@ -300,6 +300,53 @@ def _owned_update(db, run: SandboxRun, owner_token: str, **fields) -> bool:
     return True
 
 
+def _kill_local_sandbox(sandbox) -> None:
+    if sandbox is None:
+        return
+    try:
+        sandbox.kill()
+    except Exception:
+        logger.exception("failed to kill sandbox")
+
+
+def _check_run_control(
+    db, run: SandboxRun, owner_token: str, sandbox=None, *, stage: str | None = None
+) -> bool:
+    """Return whether this worker should continue.
+
+    Observes committed pause/kill, then F18 ownership via the local token.
+    A True result does not cancel a later external provider call.
+    """
+    if not owner_token:
+        return False
+    db.refresh(run)
+    if run.control_state == "killed" or run.status == "killed":
+        _kill_local_sandbox(sandbox)
+        return False
+    if run.control_state == "paused" or run.status == "paused":
+        return False
+    return _still_owns_stage(db, run, owner_token, stage=stage)
+
+
+def _persist_created_sandbox_id(
+    db, run: SandboxRun, owner_token: str, session, *, stage
+) -> bool:
+    if not _check_run_control(
+        db, run, owner_token, sandbox=session, stage=stage
+    ):
+        if run.control_state != "killed" and run.status != "killed":
+            _kill_local_sandbox(session)
+        return False
+    sandbox_id = getattr(session, "sandbox_id", None)
+    if not sandbox_id or not _owned_update(
+        db, run, owner_token, e2b_sandbox_id=sandbox_id
+    ):
+        _kill_local_sandbox(session)
+        return False
+    db.commit()
+    return True
+
+
 def _claim_clone_stage(db, run: SandboxRun, started) -> bool:
     run = _lock_run(db, run)
     if run.status in TERMINAL_STATUSES:
@@ -513,6 +560,7 @@ def _generate_retry_patch(
     verify_err: str,
     started,
     owner_token: str,
+    sandbox=None,
 ) -> None:
     previous_error = verify_err
     location_path = latest.diagnostic_path if latest else next(iter(files))
@@ -521,6 +569,10 @@ def _generate_retry_patch(
     test_source = latest.test_source if latest else ""
     while True:
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            return
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+        ):
             return
         if run.patch_attempts >= MAX_PATCH_ATTEMPTS:
             _finish(
@@ -711,12 +763,15 @@ def _required_source_sha(run: SandboxRun) -> str:
         raise RuntimeError("source_sha is required") from exc
 
 
-def _clone_run_sources(run: SandboxRun, token: str, *, sha: str | None = None):
+def _clone_run_sources(
+    run: SandboxRun, token: str, *, sha: str | None = None, on_created=None
+):
     return e2b_runner.clone_and_read_sources_in_sandbox(
         clone_url=clone_url(run.repo),
         ref=run.ref,
         token=token,
         sha=sha,
+        on_created=on_created,
     )
 
 
@@ -760,9 +815,20 @@ def clone_and_index(run_id: int) -> None:
                 pin = None
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_CLONE):
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_CLONE
+        ):
             return
-        sandbox, files = _clone_run_sources(run, token, sha=pin)
+        sandbox, files = _clone_run_sources(
+            run,
+            token,
+            sha=pin,
+            on_created=lambda session: _persist_created_sandbox_id(
+                db, run, owner_token, session, stage=STAGE_CLONE
+            ),
+        )
+        if files is None:
+            return
         head = e2b_runner.checkout_head_sha(sandbox)
         if pin and head != pin:
             raise RuntimeError(
@@ -795,6 +861,10 @@ def clone_and_index(run_id: int) -> None:
             return
 
         if _control_or_stop(db, run):
+            return
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_CLONE
+        ):
             return
 
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_CLONE):
@@ -1097,9 +1167,20 @@ def apply_patch_and_verify(run_id: int) -> None:
         log_stack.enter_context(e2b_runner.agent_log_scope(run.id, token))
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+        ):
             return
-        sandbox, files = _clone_run_sources(run, token, sha=source_sha)
+        sandbox, files = _clone_run_sources(
+            run,
+            token,
+            sha=source_sha,
+            on_created=lambda session: _persist_created_sandbox_id(
+                db, run, owner_token, session, stage=STAGE_PATCH_APPLY
+            ),
+        )
+        if files is None:
+            return
         head = e2b_runner.checkout_head_sha(sandbox)
         if head != source_sha:
             raise RuntimeError(
@@ -1138,7 +1219,9 @@ def apply_patch_and_verify(run_id: int) -> None:
         if not allowed_path:
             apply_ok, apply_err = False, ""
         else:
-            if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+            if not _check_run_control(
+                db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+            ):
                 return
             apply_ok, apply_err = apply_diff_in_sandbox(
                 sandbox, run.current_diff, allowed_path=allowed_path
@@ -1147,6 +1230,10 @@ def apply_patch_and_verify(run_id: int) -> None:
         full = None
         if apply_ok and latest and latest.test_path and latest.test_source:
             if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+                return
+            if not _check_run_control(
+                db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+            ):
                 return
             suite = run_reproduction_test(
                 sandbox,
@@ -1157,6 +1244,10 @@ def apply_patch_and_verify(run_id: int) -> None:
             if suite.reproduced:
                 tests_pass = False
             elif suite.passed_clean:
+                if not _check_run_control(
+                    db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+                ):
+                    return
                 full = run_full_test_suite(sandbox)
                 tests_pass = extra_suite_ok(full)
             else:
@@ -1171,7 +1262,9 @@ def apply_patch_and_verify(run_id: int) -> None:
         )
         if not tests_pass and not verify_err:
             verify_err = "verification could not be completed"
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PATCH_APPLY):
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+        ):
             return
         record = (
             db.query(PatchAttempt)
@@ -1194,6 +1287,10 @@ def apply_patch_and_verify(run_id: int) -> None:
             db.commit()
 
         if tests_pass:
+            if not _check_run_control(
+                db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+            ):
+                return
             if not _owned_update(
                 db, run, owner_token, pipeline_stage=STAGE_MERGE
             ):
@@ -1227,6 +1324,10 @@ def apply_patch_and_verify(run_id: int) -> None:
 
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PATCH_APPLY):
             return
+        if not _check_run_control(
+            db, run, owner_token, sandbox, stage=STAGE_PATCH_APPLY
+        ):
+            return
         _generate_retry_patch(
             db,
             run,
@@ -1235,6 +1336,7 @@ def apply_patch_and_verify(run_id: int) -> None:
             verify_err=verify_err,
             started=started,
             owner_token=owner_token,
+            sandbox=sandbox,
         )
     except Exception as exc:
         db.rollback()
@@ -1315,9 +1417,18 @@ def open_github_pr(run_id: int) -> None:
         branch = f"autopatch/run-{run.id}"
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
             return
-        sandbox, _files = _clone_run_sources(run, read_token, sha=source_sha)
+        sandbox, _files = _clone_run_sources(
+            run,
+            read_token,
+            sha=source_sha,
+            on_created=lambda session: _persist_created_sandbox_id(
+                db, run, owner_token, session, stage=STAGE_PR
+            ),
+        )
+        if _files is None:
+            return
         head = e2b_runner.checkout_head_sha(sandbox)
         if head != source_sha:
             raise RuntimeError(
@@ -1331,7 +1442,9 @@ def open_github_pr(run_id: int) -> None:
         if run.current_diff:
             if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
                 return
-            if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+            if not _check_run_control(
+                db, run, owner_token, sandbox, stage=STAGE_PR
+            ):
                 return
             allowed_path = ""
             if latest.diagnostic_path:
@@ -1356,13 +1469,15 @@ def open_github_pr(run_id: int) -> None:
             return
         if not _renew_stage_lease(db, run, owner_token, stage=STAGE_PR):
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
             return
         write_sandbox_file(
             sandbox,
             f"/home/user/repo/{test_path}",
             latest.test_source,
         )
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
+            return
         e2b_runner.run_sandbox_command(
             sandbox,
             "cd /home/user/repo && "
@@ -1388,7 +1503,7 @@ def open_github_pr(run_id: int) -> None:
             return
         if _persisted_pr_url(db, run.id):
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
             return
         e2b_runner.push_branch(sandbox, branch, write_token)
         patch = _latest_patch_attempt(db, run)
@@ -1405,13 +1520,17 @@ def open_github_pr(run_id: int) -> None:
             return
         existing_pr = _persisted_pr_url(db, run.id)
         if existing_pr:
+            if not _check_run_control(
+                db, run, owner_token, sandbox, stage=STAGE_PR
+            ):
+                return
             if _owned_update(db, run, owner_token, pr_url=existing_pr):
                 if _finish(
                     db, run, started, "completed", owner_token=owner_token
                 ):
                     db.commit()
             return
-        if not _still_owns_stage(db, run, owner_token, stage=STAGE_PR):
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
             return
         pr = create_pull_request(
             token=write_token,
@@ -1441,6 +1560,8 @@ def open_github_pr(run_id: int) -> None:
             base=run.ref or "main",
         )
         pr_url = pr.get("html_url")
+        if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
+            return
         if not _owned_update(db, run, owner_token, pr_url=pr_url):
             return
         if not _finish(db, run, started, "completed", owner_token=owner_token):

@@ -289,9 +289,12 @@ def clone_and_read_sources_in_sandbox(
     ref: str,
     token: str,
     sha: str | None = None,
+    on_created=None,
 ):
     session = get_sandbox_provider().create()
     try:
+        if on_created is not None and on_created(session) is False:
+            return session, None
         refresh_egress_allowlist(session)
         files = clone_and_read_sources(
             sandbox=session,
