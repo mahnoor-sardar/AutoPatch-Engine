@@ -215,18 +215,21 @@ def apply_gate_expiry(
         .one_or_none()
     )
     if run is not None and run.control_state != "killed":
-        run.control_state = "paused"
-        run.status = "paused"
-        log_audit(
-            db,
-            "expire",
-            run.id,
-            None,
-            gate.gate,
-            actor=ACTOR_SYSTEM,
-            result=RESULT_EXPIRED,
-            event_metadata={"gate": gate.gate},
-        )
+        from app.workers.tasks import TERMINAL_STATUSES
+
+        if run.status not in TERMINAL_STATUSES:
+            run.control_state = "paused"
+            run.status = "paused"
+            log_audit(
+                db,
+                "expire",
+                run.id,
+                None,
+                gate.gate,
+                actor=ACTOR_SYSTEM,
+                result=RESULT_EXPIRED,
+                event_metadata={"gate": gate.gate},
+            )
         if notify:
             from app.services.events import notify_run_event
 

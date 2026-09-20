@@ -57,7 +57,13 @@ from app.services.audit import (
 from app.services.e2b_runner import sanitize_log_text
 from app.services.events import publish_run_update
 from app.services.providers import get_sandbox_provider
-from app.workers.tasks import apply_patch_and_verify, clone_and_index, open_github_pr
+from app.workers.tasks import (
+    TERMINAL_STATUSES,
+    _ensure_finished_at,
+    apply_patch_and_verify,
+    clone_and_index,
+    open_github_pr,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -489,6 +495,8 @@ def _control(
         raise HTTPException(status_code=401, detail="invalid otp")
 
     if action == "pause":
+        if run.status in TERMINAL_STATUSES:
+            raise HTTPException(status_code=409, detail="run is terminal")
         if run.status == "awaiting_patch_review":
             run.pipeline_stage = STAGE_PATCH_REVIEW
         elif run.status == "awaiting_merge":
@@ -498,13 +506,37 @@ def _control(
         run.control_state = "paused"
         run.status = "paused"
     elif action == "resume":
-        if run.control_state != "paused":
+        if run.control_state != "paused" or run.status != "paused":
             raise HTTPException(status_code=409, detail="run is not paused")
         resume_paused_run(run, db)
     elif action == "kill":
         run.control_state = "killed"
         run.status = "killed"
-        _kill_sandbox(run)
+        _ensure_finished_at(run)
+        log_audit(
+            db,
+            action,
+            run.id,
+            device.device_id,
+            action,
+            actor=ACTOR_ANDROID,
+            result=RESULT_SUCCESS,
+            event_metadata={"control": action},
+        )
+        db.commit()
+        try:
+            _kill_sandbox(run)
+        except Exception:
+            logger.exception("failed to kill sandbox run_id=%s", run.id)
+        publish_run_update(
+            {
+                "type": "control",
+                "run_id": run.id,
+                "status": run.status,
+                "control_state": run.control_state,
+            }
+        )
+        return {"ok": True, "run_id": run.id, "control_state": run.control_state}
 
     log_audit(
         db,
