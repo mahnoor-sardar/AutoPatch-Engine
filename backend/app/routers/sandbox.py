@@ -237,7 +237,7 @@ def resume_paused_run(run: SandboxRun, db: Session) -> None:
         _ensure_pending_gate(db, run, MERGE_GATE)
         return
     if stage == STAGE_PR:
-        run.status = "queued"
+        run.status = "awaiting_merge"
         _enqueue(open_github_pr, run.id)
         return
     run.status = "queued"

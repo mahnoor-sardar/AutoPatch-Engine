@@ -511,5 +511,6 @@ def test_resume_apply_and_pr_stages_still_enqueue(monkeypatch):
     )
     resume_paused_run(pr_run, RecordingDB(pr_run, []))
     assert pr_run.control_state == "active"
-    assert pr_run.status == "queued"
+    assert pr_run.status == "awaiting_merge"
+    assert pr_run.pipeline_stage == STAGE_PR
     assert pr_delayed == [22]

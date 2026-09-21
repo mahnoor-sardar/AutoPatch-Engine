@@ -264,7 +264,8 @@ def test_resume_genuinely_paused_clone_apply_pr(monkeypatch):
     assert ("pr", pr_id) in delayed
     assert _load(clone_id).status == "queued"
     assert _load(apply_id).status == "queued"
-    assert _load(pr_id).status == "queued"
+    assert _load(pr_id).status == "awaiting_merge"
+    assert _load(pr_id).pipeline_stage == STAGE_PR
     assert _load(clone_id).control_state == "active"
 
 
