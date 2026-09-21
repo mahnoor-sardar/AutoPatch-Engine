@@ -283,9 +283,12 @@ def test_resume_paused_run_helper_still_enqueues(monkeypatch):
         control_state="paused",
         pipeline_stage=STAGE_PATCH_APPLY,
     )
-    resume_paused_run(apply_run, RecordingDB(apply_run, []))
+    from app.workers.tasks import apply_patch_and_verify
+
+    task = resume_paused_run(apply_run, RecordingDB(apply_run, []))
     assert apply_run.status == "queued"
-    assert delayed == [31]
+    assert delayed == []
+    assert task is apply_patch_and_verify
 
 
 def test_gate_expiry_does_not_pause_terminal_completed():

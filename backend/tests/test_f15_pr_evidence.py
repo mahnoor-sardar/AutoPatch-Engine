@@ -129,6 +129,10 @@ def _stub_pr_flow(monkeypatch, *, sandbox=None, apply_impl=None):
         "app.workers.tasks.create_pull_request",
         lambda **kwargs: prs.append(kwargs) or {"html_url": "https://github.com/a/b/pull/1"},
     )
+    monkeypatch.setattr(
+        "app.workers.tasks.find_open_pull_request",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
     return events, pushed, prs, applies, sandbox
 

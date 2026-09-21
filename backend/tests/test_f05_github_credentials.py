@@ -278,6 +278,10 @@ def test_open_github_pr_requests_write_token_after_merge_gate(monkeypatch):
         "app.workers.tasks.create_pull_request",
         lambda **kwargs: {"html_url": "https://github.com/acme/demo/pull/1"},
     )
+    monkeypatch.setattr(
+        "app.workers.tasks.find_open_pull_request",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr("app.services.fcm.send_push", lambda *a, **k: "ok")
     open_github_pr.run(run_id)
     assert seen == [PERMISSIONS_REPO_READ, PERMISSIONS_PR_WRITE]

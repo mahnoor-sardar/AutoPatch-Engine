@@ -225,9 +225,13 @@ def test_resume_clone_stage_enqueues_clone(monkeypatch):
         pipeline_stage=STAGE_CLONE,
     )
     db = RecordingDB(run, [])
-    resume_paused_run(run, db)
-    assert delayed == [7]
+    from app.workers.tasks import clone_and_index
+
+    task = resume_paused_run(run, db)
+    assert delayed == []
+    assert task is clone_and_index
     assert run.control_state == "active"
+    assert run.status == "queued"
 
 
 def test_resume_provision_without_approval_does_not_clone(monkeypatch):

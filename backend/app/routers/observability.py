@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -16,12 +17,20 @@ from app.services.approval import (
 from app.services.stacktrace import parse_stack_trace
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _enqueue_clone_and_index(run_id: int) -> None:
     from app.workers.tasks import enqueue_clone_and_index
 
-    enqueue_clone_and_index(run_id)
+    try:
+        enqueue_clone_and_index(run_id)
+    except Exception as exc:
+        logger.exception("failed to publish clone_and_index run_id=%s", run_id)
+        raise HTTPException(
+            status_code=503,
+            detail="failed to dispatch run task",
+        ) from exc
 
 
 def _verify_signature(

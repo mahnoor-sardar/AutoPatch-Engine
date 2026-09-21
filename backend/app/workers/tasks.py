@@ -48,6 +48,7 @@ from app.services.github_pr import (
     ReproductionTestPathError,
     build_pr_body,
     create_pull_request,
+    find_open_pull_request,
     validate_reproduction_test_path,
 )
 from app.services.harness import (
@@ -754,6 +755,29 @@ def _persisted_pr_url(db, run_id: int) -> str | None:
         .filter(SandboxRun.id == run_id)
         .scalar()
     )
+
+
+def _persist_pr_and_complete(db, run: SandboxRun, started, owner_token: str, pr_url: str) -> bool:
+    if not pr_url:
+        return False
+    if not _owned_update(db, run, owner_token, pr_url=pr_url):
+        return False
+    db.commit()
+    if not _finish(db, run, started, "completed", owner_token=owner_token):
+        return False
+    log_audit(
+        db,
+        "pr_opened",
+        run.id,
+        None,
+        run.pr_url,
+        actor=ACTOR_WORKER,
+        result=RESULT_SUCCESS,
+        event_metadata={"pr_url": run.pr_url} if run.pr_url else None,
+    )
+    db.commit()
+    notify_run_event(db, run, "Pull request opened", run.pr_url or "")
+    return True
 
 
 def _required_source_sha(run: SandboxRun) -> str:
@@ -1524,13 +1548,15 @@ def open_github_pr(run_id: int) -> None:
                 db, run, owner_token, sandbox, stage=STAGE_PR
             ):
                 return
-            if _owned_update(db, run, owner_token, pr_url=existing_pr):
-                if _finish(
-                    db, run, started, "completed", owner_token=owner_token
-                ):
-                    db.commit()
+            _persist_pr_and_complete(db, run, started, owner_token, existing_pr)
             return
         if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
+            return
+        discovered = find_open_pull_request(write_token, run.repo, branch)
+        if discovered and discovered.get("html_url"):
+            _persist_pr_and_complete(
+                db, run, started, owner_token, discovered["html_url"]
+            )
             return
         pr = create_pull_request(
             token=write_token,
@@ -1559,25 +1585,12 @@ def open_github_pr(run_id: int) -> None:
             head=branch,
             base=run.ref or "main",
         )
-        pr_url = pr.get("html_url")
+        pr_url = pr.get("html_url") if isinstance(pr, dict) else None
+        if not pr_url:
+            return
         if not _check_run_control(db, run, owner_token, sandbox, stage=STAGE_PR):
             return
-        if not _owned_update(db, run, owner_token, pr_url=pr_url):
-            return
-        if not _finish(db, run, started, "completed", owner_token=owner_token):
-            return
-        log_audit(
-            db,
-            "pr_opened",
-            run.id,
-            None,
-            run.pr_url,
-            actor=ACTOR_WORKER,
-            result=RESULT_SUCCESS,
-            event_metadata={"pr_url": run.pr_url} if run.pr_url else None,
-        )
-        db.commit()
-        notify_run_event(db, run, "Pull request opened", run.pr_url or "")
+        _persist_pr_and_complete(db, run, started, owner_token, pr_url)
     except Exception as exc:
         db.rollback()
         run = _load_run(db, run_id)

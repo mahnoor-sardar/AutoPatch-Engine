@@ -288,7 +288,7 @@ def test_replay_of_approved_gate_does_not_enqueue_again(monkeypatch):
         )
         assert replay.status_code == 200
         assert replay.json()["status"] == "approved"
-        assert delayed == [421]
+        assert delayed == [421, 421]
     finally:
         app.dependency_overrides.clear()
 

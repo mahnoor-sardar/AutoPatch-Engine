@@ -33,12 +33,17 @@ def test_paused_pr_resume_produces_claimable_awaiting_merge(monkeypatch):
         db.commit()
         db.refresh(run)
         run_id = run.id
-        resume_paused_run(run, db)
+        task = resume_paused_run(run, db)
         db.commit()
         db.refresh(run)
         assert run.status == "awaiting_merge"
         assert run.control_state == "active"
         assert run.pipeline_stage == STAGE_PR
+        assert delayed == []
+        from app.workers.tasks import open_github_pr as pr_task
+
+        assert task is pr_task
+        pr_task.delay(run_id)
         assert delayed == [run_id]
         started = datetime.now(timezone.utc)
         assert _claim_pr_stage(db, run, started) is True

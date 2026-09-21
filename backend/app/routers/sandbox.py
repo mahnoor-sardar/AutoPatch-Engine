@@ -70,7 +70,18 @@ logger = logging.getLogger(__name__)
 
 
 def _enqueue(task, run_id: int) -> None:
-    result = task.delay(run_id)
+    try:
+        result = task.delay(run_id)
+    except Exception as exc:
+        logger.exception(
+            "failed to publish celery task %s run_id=%s",
+            getattr(task, "name", task),
+            run_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="failed to dispatch run task",
+        ) from exc
     logger.info(
         "published celery task %s run_id=%s task_id=%s queue=celery",
         getattr(task, "name", task),
@@ -80,12 +91,52 @@ def _enqueue(task, run_id: int) -> None:
 
 
 def _enqueue_for_gate(gate_name: str, run_id: int) -> None:
+    task = _task_for_gate(gate_name)
+    if task is not None:
+        _enqueue(task, run_id)
+
+
+def _task_for_gate(gate_name: str):
     if gate_name == SANDBOX_PROVISION_GATE:
-        _enqueue(clone_and_index, run_id)
-    elif gate_name == PATCH_REVIEW_GATE:
-        _enqueue(apply_patch_and_verify, run_id)
-    elif gate_name == MERGE_GATE:
-        _enqueue(open_github_pr, run_id)
+        return clone_and_index
+    if gate_name == PATCH_REVIEW_GATE:
+        return apply_patch_and_verify
+    if gate_name == MERGE_GATE:
+        return open_github_pr
+    return None
+
+
+def _task_for_approved_idle_run(run: SandboxRun, gate_name: str):
+    """Return a Celery task only when re-dispatch is a safe idle retry."""
+    if run.pr_url:
+        return None
+    if run.control_state == "killed" or run.status in TERMINAL_STATUSES:
+        return None
+    if run.status in ("running", "paused"):
+        return None
+    stage = run.pipeline_stage or STAGE_PROVISION
+    if gate_name == SANDBOX_PROVISION_GATE:
+        if run.status == "queued" and stage in (STAGE_PROVISION, STAGE_CLONE):
+            return clone_and_index
+        return None
+    if gate_name == PATCH_REVIEW_GATE:
+        if run.status in ("queued", "awaiting_patch_review") and stage in (
+            STAGE_PATCH_REVIEW,
+            STAGE_PATCH_APPLY,
+        ):
+            return apply_patch_and_verify
+        return None
+    if gate_name == MERGE_GATE:
+        if run.status == "awaiting_merge" and stage in (STAGE_MERGE, STAGE_PR):
+            return open_github_pr
+        return None
+    return None
+
+
+def _redispatch_approved_idle(run: SandboxRun, gate_name: str) -> None:
+    task = _task_for_approved_idle_run(run, gate_name)
+    if task is not None:
+        _enqueue(task, run.id)
 
 
 def _require_device(db: Session, device_id: str) -> Device:
@@ -201,47 +252,42 @@ def _ensure_pending_gate(db: Session, run: SandboxRun, name: str) -> None:
     _create_pending_gate_http(db, run, name)
 
 
-def resume_paused_run(run: SandboxRun, db: Session) -> None:
+def resume_paused_run(run: SandboxRun, db: Session):
+    """Mutate the run for resume. Return the Celery task to publish after commit."""
     run.control_state = "active"
     stage = run.pipeline_stage or STAGE_PROVISION
     if stage == STAGE_PROVISION:
         run.status = "queued"
         gate = _latest_gate(db, run, SANDBOX_PROVISION_GATE)
         if gate is not None and gate.status == "approved":
-            _enqueue(clone_and_index, run.id)
-            return
+            return clone_and_index
         _ensure_pending_gate(db, run, SANDBOX_PROVISION_GATE)
-        return
+        return None
     if stage == STAGE_CLONE:
         run.status = "queued"
-        _enqueue(clone_and_index, run.id)
-        return
+        return clone_and_index
     if stage == STAGE_PATCH_REVIEW:
         run.status = "awaiting_patch_review"
         gate = _latest_gate(db, run, PATCH_REVIEW_GATE)
         if gate is not None and gate.status == "approved":
-            _enqueue(apply_patch_and_verify, run.id)
-            return
+            return apply_patch_and_verify
         _ensure_pending_gate(db, run, PATCH_REVIEW_GATE)
-        return
+        return None
     if stage == STAGE_PATCH_APPLY:
         run.status = "queued"
-        _enqueue(apply_patch_and_verify, run.id)
-        return
+        return apply_patch_and_verify
     if stage == STAGE_MERGE:
         run.status = "awaiting_merge"
         gate = _latest_gate(db, run, MERGE_GATE)
         if gate is not None and gate.status == "approved":
-            _enqueue(open_github_pr, run.id)
-            return
+            return open_github_pr
         _ensure_pending_gate(db, run, MERGE_GATE)
-        return
+        return None
     if stage == STAGE_PR:
         run.status = "awaiting_merge"
-        _enqueue(open_github_pr, run.id)
-        return
+        return open_github_pr
     run.status = "queued"
-    _enqueue(clone_and_index, run.id)
+    return clone_and_index
 
 
 @router.post(
@@ -320,6 +366,7 @@ def approve_sandbox(
                     status_code=403,
                     detail="device is not authorized for this gate",
                 )
+            _redispatch_approved_idle(run, latest.gate)
             return {
                 "ok": True,
                 "run_id": run.id,
@@ -353,6 +400,7 @@ def approve_sandbox(
 
     claimed = try_claim_pending_gate(db, gate.id, device.device_id)
     if claimed is None:
+        _redispatch_approved_idle(run, gate.gate)
         return {
             "ok": True,
             "run_id": run.id,
@@ -494,6 +542,7 @@ def _control(
     ):
         raise HTTPException(status_code=401, detail="invalid otp")
 
+    pending_task = None
     if action == "pause":
         if run.status in TERMINAL_STATUSES:
             raise HTTPException(status_code=409, detail="run is terminal")
@@ -508,7 +557,7 @@ def _control(
     elif action == "resume":
         if run.control_state != "paused" or run.status != "paused":
             raise HTTPException(status_code=409, detail="run is not paused")
-        resume_paused_run(run, db)
+        pending_task = resume_paused_run(run, db)
     elif action == "kill":
         run.control_state = "killed"
         run.status = "killed"
@@ -549,6 +598,8 @@ def _control(
         event_metadata={"control": action},
     )
     db.commit()
+    if pending_task is not None:
+        _enqueue(pending_task, run.id)
     publish_run_update(
         {
             "type": "control",

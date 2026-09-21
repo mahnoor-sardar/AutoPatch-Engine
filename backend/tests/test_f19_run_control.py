@@ -496,10 +496,13 @@ def test_resume_apply_and_pr_stages_still_enqueue(monkeypatch):
         control_state="paused",
         pipeline_stage=STAGE_PATCH_APPLY,
     )
-    resume_paused_run(apply_run, RecordingDB(apply_run, []))
+    from app.workers.tasks import apply_patch_and_verify, open_github_pr
+
+    apply_task = resume_paused_run(apply_run, RecordingDB(apply_run, []))
     assert apply_run.control_state == "active"
     assert apply_run.status == "queued"
-    assert apply_delayed == [21]
+    assert apply_delayed == []
+    assert apply_task is apply_patch_and_verify
 
     pr_run = SandboxRun(
         id=22,
@@ -509,8 +512,9 @@ def test_resume_apply_and_pr_stages_still_enqueue(monkeypatch):
         control_state="paused",
         pipeline_stage=STAGE_PR,
     )
-    resume_paused_run(pr_run, RecordingDB(pr_run, []))
+    task = resume_paused_run(pr_run, RecordingDB(pr_run, []))
     assert pr_run.control_state == "active"
     assert pr_run.status == "awaiting_merge"
     assert pr_run.pipeline_stage == STAGE_PR
-    assert pr_delayed == [22]
+    assert pr_delayed == []
+    assert task is open_github_pr

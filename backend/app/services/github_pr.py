@@ -121,6 +121,36 @@ def build_pr_body(
     )
 
 
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def find_open_pull_request(token: str, repo: str, head: str) -> dict | None:
+    """Return the open PR for this repo whose head ref is exactly ``head``."""
+    owner = repo.split("/", 1)[0]
+    with httpx.Client(timeout=30) as client:
+        response = client.get(
+            f"https://api.github.com/repos/{repo}/pulls",
+            headers=_github_headers(token),
+            params={"head": f"{owner}:{head}", "state": "open"},
+        )
+    response.raise_for_status()
+    items = response.json()
+    if not isinstance(items, list):
+        return None
+    for pr in items:
+        if not isinstance(pr, dict):
+            continue
+        pr_head = (pr.get("head") or {}).get("ref")
+        if pr_head == head and pr.get("html_url"):
+            return pr
+    return None
+
+
 def create_pull_request(
     token: str,
     repo: str,
@@ -132,11 +162,7 @@ def create_pull_request(
     with httpx.Client(timeout=30) as client:
         response = client.post(
             f"https://api.github.com/repos/{repo}/pulls",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=_github_headers(token),
             json={
                 "title": title,
                 "body": body,
@@ -144,5 +170,9 @@ def create_pull_request(
                 "base": base,
             },
         )
+    if response.status_code == 422:
+        existing = find_open_pull_request(token, repo, head)
+        if existing is not None:
+            return existing
     response.raise_for_status()
     return response.json()

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import httpx
 
@@ -17,6 +18,7 @@ from app.services.approval import (
 from app.services.github_app import get_installation_token, verify_webhook_signature
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _GIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 _ZERO_SHA = "0" * 40
@@ -35,7 +37,14 @@ def _push_source_sha(payload: dict) -> str | None:
 def _enqueue_clone_and_index(run_id: int) -> None:
     from app.workers.tasks import enqueue_clone_and_index
 
-    enqueue_clone_and_index(run_id)
+    try:
+        enqueue_clone_and_index(run_id)
+    except Exception as exc:
+        logger.exception("failed to publish clone_and_index run_id=%s", run_id)
+        raise HTTPException(
+            status_code=503,
+            detail="failed to dispatch run task",
+        ) from exc
 
 
 def _upsert_repos(db: Session, installation_id: int, repos: list[dict]) -> None:
